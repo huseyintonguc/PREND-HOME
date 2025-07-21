@@ -38,9 +38,9 @@ st_autorefresh(interval=30 * 1000, key="data_fetch_refresher")
 # --- FONKSİYONLAR: İADE/TALEP YÖNETİMİ ---
 
 def get_pending_claims():
-    """Sadece YENİ (Created) durumdaki talepleri API'den çeker."""
-    # DEĞİŞİKLİK: Sadece yeni ve işlem bekleyen talepleri çekmek için 'claimItemStatus=Created' filtresi eklendi.
-    url = f"https://apigw.trendyol.com/integration/order/sellers/{SELLER_ID}/claims?claimItemStatus=Created&size=50&page=0"
+    """Sadece 'Aksiyon Bekleyen' (WaitingInAction) durumundaki talepleri API'den çeker."""
+    # SON DEĞİŞİKLİK: Filtre, sizin belirttiğiniz doğru durum olan 'WaitingInAction' olarak güncellendi.
+    url = f"https://apigw.trendyol.com/integration/order/sellers/{SELLER_ID}/claims?claimItemStatus=WaitingInAction&size=50&page=0"
     try:
         response = requests.get(url, headers=HEADERS)
         response.raise_for_status()
@@ -93,7 +93,7 @@ def generate_answer(product_name, question, past_df):
         mask = past_df['Ürün İsmi'].astype(str).str.contains(str(product_name), case=False, na=False)
         examples = past_df[mask]
 
-    prompt = f"Sen bir müşteri temsilcisisin..." # (Bu fonksiyonun içeriği aynı, kısaltıldı)
+    prompt = f"Sen bir müşteri temsilcisisin..." # (İçerik aynı, kısaltıldı)
     try:
         client = openai.OpenAI(api_key=openai.api_key)
         response = client.chat.completions.create(
@@ -117,6 +117,7 @@ def send_answer(question_id, answer_text):
         return False, str(e)
 
 # --- ANA KONTROL PANELİ ARAYÜZÜ ---
+# Bu bölümde hiçbir değişiklik yok, aynı kalıyor.
 
 EXCEL_FILE_NAME = "soru_cevap_ornekleri.xlsx"
 past_df = load_past_data(EXCEL_FILE_NAME)
@@ -181,7 +182,6 @@ with col2:
 
                 with st.expander(f"Soru ID: {q_id} - Ürün: {q.get('productName', '')[:30]}...", expanded=True):
                     st.markdown(f"**Soru:** *{q.get('text', '')}*")
-
                     # ... (Zamanlayıcı ve cevaplama mantığı aynı, kısaltıldı)
     except Exception as e:
         st.error(f"Müşteri Soruları bölümünde bir hata oluştu: {e}")
