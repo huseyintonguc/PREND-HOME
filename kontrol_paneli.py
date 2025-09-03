@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import base64
 import openai
+import re
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 
@@ -35,8 +36,33 @@ HEADERS = {
 # Sayfa otomatik yenileme
 st_autorefresh(interval=30 * 1000, key="data_fetch_refresher")
 
-# --- FONKSİYONLAR: İADE/TALEP YÖNETİMİ ---
+# =========================
+# YENİ: CEVAP FİLTRE AYARLARI
+# =========================
 
+# Sidebar kontrolü: Minimum örnek sayısı eşiği
+st.sidebar.header("Cevap Filtre Ayarları")
+MIN_EXAMPLES = st.sidebar.number_input(
+    "Otomatik cevap için gerekli minimum örnek sayısı",
+    min_value=1, max_value=10, value=1, step=1,
+    help="Excel'de ilgili ürüne ait en az bu kadar örnek bulunmazsa otomatik cevap gönderilmez."
+)
+
+# Yasaklı yönlendirme kalıpları (url, sosyal ağ, web sitesi vb.)
+FORBIDDEN_PATTERNS = [
+    r"http[s]?://", r"\bwww\.", r"\.com\b", r"\.net\b", r"\.org\b",
+    r"\blink\b", r"\bsite\b", r"\bweb ?sitemiz\b", r"\bmağazamızın sitesi\b",
+    r"\binstagram\b", r"\bwhats?app\b", r"\bDM\b", r"\bdm\b", r"\btelegram\b"
+]
+
+def passes_forbidden_filter(text: str) -> (bool, str):
+    """Web yönlendirmesi ve dış kanal ifadelerini engeller."""
+    for pat in FORBIDDEN_PATTERNS:
+        if re.search(pat, text, flags=re.IGNORECASE):
+            return False, f"YASAK: Cevap yönlendirme içeriyor ({pat})."
+    return True, ""
+
+# --- FONKSİYONLAR: İADE/TALEP YÖNETİMİ ---
 def get_pending_claims():
     url = f"https://apigw.trendyol.com/integration/order/sellers/{SELLER_ID}/claims?claimItemStatus=WaitingInAction&size=50&page=0"
     try:
@@ -57,7 +83,6 @@ def approve_claim_items(claim_id, claim_item_ids):
         return False, str(e)
 
 # --- FONKSİYONLAR: SORU-CEVAP YÖNETİMİ ---
-
 def load_past_data(file_path):
     try:
         df = pd.read_excel(file_path)
@@ -79,30 +104,52 @@ def get_waiting_questions():
         st.error(f"Sorular çekilirken bir hata oluştu: {e}")
         return []
 
-def generate_answer(product_name, question, past_df):
+def generate_answer(product_name, question, past_df, min_examples=1):
+    """
+    YENİ DAVRANIŞ:
+    - İlgili ürüne dair past_df'de en az 'min_examples' örnek yoksa -> None (CEVAP YOK)
+    - Varsa, kısa ve yönlendirme içermeyen cevap üret.
+    """
     if not openai.api_key:
-        return "OpenAI API anahtarı 'Secrets' içinde bulunamadı."
+        return None, "OpenAI API anahtarı bulunamadı."
+
     examples = pd.DataFrame()
     if past_df is not None:
         mask = past_df['Ürün İsmi'].astype(str).str.contains(str(product_name), case=False, na=False)
         examples = past_df[mask]
 
-    prompt = f"Sen bir müşteri temsilcisisin. Aşağıdaki soruya, geçmişte verilen cevapları örnek alarak, nazik, yardımsever ve kısa bir cevap ver.\n\n"
-    prompt += f"Ürün Adı: {product_name}\nMüşteri Sorusu: {question}\n\n--- Örnek Geçmiş Cevaplar ---\n"
+    if examples.empty or len(examples) < min_examples:
+        return None, f"Örnek sayısı yetersiz ({len(examples)}/{min_examples}). Otomatik cevap gönderilmeyecek."
+
+    # Modeli yönlendirme yapmaması için talimatla kısıtla
+    prompt = (
+        "Sen bir pazaryeri müşteri temsilcisisin. Aşağıdaki soruya, yalnızca verilen örnek cevapların bilgisini ve "
+        "genel işleyiş kurallarını kullanarak KISA, NAZİK ve NET bir cevap ver. "
+        "ASLA dış web sitesi, link, sosyal medya veya harici kanal yönlendirmesi yapma. "
+        "Bilmiyorsan veya örneklerde cevap yoksa cevap üretme.\n\n"
+        f"Ürün Adı: {product_name}\nMüşteri Sorusu: {question}\n\n"
+        "--- Örnek Geçmiş Cevaplar ---\n"
+    )
     for _, row in examples.head(5).iterrows():
         prompt += f"Soru: {row['Soru Detayı']}\nCevap: {row['Onaylanan Cevap']}\n---\n"
-    prompt += "Oluşturulacak Cevap:"
+    prompt += "Oluşturulacak Cevap (harici yönlendirme YASAK):"
+
     try:
-        client = openai.OpenAI(api_key=openai.api_key)
+        client = openai.OpenAI(api_key=openai.api_key)  # :contentReference[oaicite:1]{index=1}
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=150,
-            temperature=0.7
+            temperature=0.4
         )
-        return response.choices[0].message.content.strip()
+        answer = response.choices[0].message.content.strip()
+        # Yönlendirme filtresi
+        ok, reason = passes_forbidden_filter(answer)
+        if not ok:
+            return None, reason
+        return answer, ""
     except Exception as e:
-        return f"OpenAI'den cevap üretilirken hata oluştu: {e}"
+        return None, f"OpenAI hata: {e}"
 
 def send_answer(question_id, answer_text):
     url = f"https://apigw.trendyol.com/integration/qna/sellers/{SELLER_ID}/questions/{question_id}/answers"
@@ -167,7 +214,6 @@ with col2:
             st.info("Cevap bekleyen soru bulunamadı.")
         else:
             st.write(f"**{len(questions)}** adet cevap bekleyen soru var.")
-            
             if 'questions_handled' not in st.session_state:
                 st.session_state.questions_handled = []
 
@@ -181,16 +227,25 @@ with col2:
 
                     if f"time_{q_id}" not in st.session_state:
                         st.session_state[f"time_{q_id}"] = datetime.now()
-                    
                     elapsed = datetime.now() - st.session_state[f"time_{q_id}"]
 
                     if AUTO_ANSWER_QUESTIONS:
                         if DELAY_MINUTES == 0 or elapsed >= timedelta(minutes=DELAY_MINUTES):
-                            with st.spinner(f"Soru ID {q_id}: Otomatik cevap gönderiliyor..."):
-                                gpt_answer = generate_answer(q.get("productName", ""), q.get("text", ""), past_df)
-                                st.info(f"Otomatik gönderilen cevap:\n\n> {gpt_answer}")
-                                
-                                success, message = send_answer(q_id, gpt_answer)
+                            with st.spinner(f"Soru ID {q_id}: Otomatik cevap kontrol ediliyor..."):
+                                # YENİ: Örnek eşiği ve yönlendirme filtresi ile üret
+                                answer, reason = generate_answer(
+                                    q.get("productName", ""),
+                                    q.get("text", ""),
+                                    past_df,
+                                    min_examples=MIN_EXAMPLES
+                                )
+                                if answer is None:
+                                    st.warning(f"Otomatik cevap gönderilmedi: {reason}")
+                                    # Bu soruyu atla; ileride örnekler artarsa cevaplanabilir
+                                    continue
+
+                                st.info(f"Otomatik gönderilecek cevap:\n\n> {answer}")
+                                success, message = send_answer(q_id, answer)
                                 if success:
                                     st.success("Cevap başarıyla otomatik gönderildi.")
                                     st.session_state.questions_handled.append(q_id)
@@ -202,17 +257,30 @@ with col2:
                             remaining_minutes = int(remaining_seconds / 60)
                             remaining_sec = int(remaining_seconds % 60)
                             st.warning(f"Bu soruya otomatik cevap yaklaşık **{remaining_minutes} dakika {remaining_sec} saniye** içinde gönderilecek.")
-                    
-                    else: # Manuel mod
-                        answer_suggestion = generate_answer(q.get("product_name", ""), q.get("text", ""), past_df)
-                        cevap = st.text_area("Cevabınız:", value=answer_suggestion, key=f"manual_{q_id}")
+
+                    else:  # Manuel mod
+                        # Öneri yalnızca yeterli örnek varsa oluşturulsun
+                        suggestion, reason = generate_answer(q.get("productName", ""), q.get("text", ""), past_df, min_examples=MIN_EXAMPLES)
+                        default_text = suggestion if suggestion is not None else ""
+                        if suggestion is None:
+                            st.info(f"Öneri üretilmedi: {reason}")
+
+                        cevap = st.text_area("Cevabınız:", value=default_text, key=f"manual_{q_id}")
+
+                        # Manuelde de gönderim öncesi yasak filtre
                         if st.button(f"Cevabı Gönder (ID: {q_id})", key=f"btn_{q_id}"):
-                            success, message = send_answer(q_id, cevap)
-                            if success:
-                                st.success("Cevap başarıyla gönderildi.")
-                                st.session_state.questions_handled.append(q_id)
-                                st.rerun()
+                            ok, why = passes_forbidden_filter(cevap)
+                            if not ok:
+                                st.error(why)
+                            elif not cevap.strip():
+                                st.error("Boş cevap gönderilemez.")
                             else:
-                                st.error(f"Cevap gönderilemedi: {message}")
+                                success, message = send_answer(q_id, cevap)
+                                if success:
+                                    st.success("Cevap başarıyla gönderildi.")
+                                    st.session_state.questions_handled.append(q_id)
+                                    st.rerun()
+                                else:
+                                    st.error(f"Cevap gönderilemedi: {message}")
     except Exception as e:
         st.error(f"Müşteri Soruları bölümünde bir hata oluştu: {e}")
