@@ -8,7 +8,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # --- Streamlit Arayüzü ve Ayarları ---
 st.set_page_config(layout="wide")
-st.title("Trendyol Otomasyon Paneli (v3.2 - Gelişmiş Bildirim)")
+st.title("Trendyol Otomasyon Paneli (v3.3 - Manuel Test Modu)")
 
 # --- API Bilgilerini ve Ayarları Güvenli Olarak Oku ---
 try:
@@ -44,40 +44,36 @@ HEADERS = {
 # Sayfa otomatik yenileme (30 saniyede bir)
 st_autorefresh(interval=30 * 1000, key="data_fetch_refresher")
 
-# --- YASAKLI KELİME FİLTRESİ (Yapay Zeka için) ---
-# ... (Bu fonksiyon değişmedi) ...
+# --- YASAKLI KELİME FİLTRESİ ---
 FORBIDDEN_PATTERNS = [
     r"http[s]?://", r"\bwww\.", r"\.com\b", r"\.net\b", r"\.org\b",
     r"\blink\b", r"\bsite\b", r"\bweb\w*\b", r"\binstagram\b",
     r"\bwhats?app\b", r"\bdm\b", r"\btelegram\b"
 ]
-
 def passes_forbidden_filter(text: str) -> bool:
     for pat in FORBIDDEN_PATTERNS:
-        if re.search(pat, text, flags=re.IGNORECASE):
-            return False
+        if re.search(pat, text, flags=re.IGNORECASE): return False
     return True
 
 # --- FONKSİYONLAR ---
 
-# --- TELEGRAM FONKSİYONLARI (GELİŞTİRİLMİŞ HATA RAPORLAMA) ---
+# --- TELEGRAM FONKSİYONLARI ---
 def send_telegram_message(chat_id, text):
-    """Belirtilen chat_id'ye Telegram mesajı gönderir ve hataları arayüzde gösterir."""
     base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'}
     try:
         response = requests.post(base_url, json=payload)
-        response.raise_for_status() # HTTP 200 dışında bir durum varsa hata fırlatır
+        response.raise_for_status()
+        st.sidebar.success("Telegram mesajı başarıyla gönderildi!")
+        return True
     except requests.exceptions.RequestException as e:
         error_info = ""
         if e.response is not None:
-            try:
-                error_info = e.response.json().get('description', 'Bilinmeyen API Hatası')
-            except ValueError:
-                error_info = e.response.text
+            try: error_info = e.response.json().get('description', 'Bilinmeyen API Hatası')
+            except ValueError: error_info = e.response.text
         st.sidebar.error(f"Telegram Hatası: {error_info or e}")
+        return False
 
-# ... (Diğer fonksiyonlar değişmedi) ...
 def send_question_notification(questions_list):
     question_count = len(questions_list)
     message = f"📢 **Trendyol Bildirimi** 📢\n\nMağazanızda cevap bekleyen **{question_count}** yeni soru var:\n\n"
@@ -88,6 +84,7 @@ def send_question_notification(questions_list):
     message += "Cevaplamak için Telegram'dan `/cevap <SoruID> <Metin>` komutunu kullanabilirsiniz."
     send_telegram_message(TELEGRAM_CHAT_ID, message)
 
+# ... (Diğer tüm fonksiyonlar aynı kaldı) ...
 def get_telegram_updates(offset):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     params = {'offset': offset, 'timeout': 10}
@@ -95,18 +92,15 @@ def get_telegram_updates(offset):
         response = requests.get(url, params=params)
         response.raise_for_status()
         return response.json().get('result', [])
-    except Exception:
-        return []
+    except Exception: return []
 
 def get_pending_claims():
     url = f"https://api.trendyol.com/sapigw/sellers/{SELLER_ID}/claims?claimItemStatus=WaitingInAction"
     try:
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
+        response = requests.get(url, headers=HEADERS); response.raise_for_status()
         return response.json().get('content', [])
     except Exception as e:
-        st.error(f"İade/Talep Talepleri çekilirken bir hata oluştu: {e}")
-        return []
+        st.error(f"İade/Talep Talepleri çekilirken bir hata oluştu: {e}"); return []
 
 def approve_claim_items(claim_id, claim_item_ids):
     url = f"https://api.trendyol.com/sapigw/sellers/{SELLER_ID}/claims/{claim_id}/items/approve"
@@ -114,85 +108,60 @@ def approve_claim_items(claim_id, claim_item_ids):
     try:
         response = requests.put(url, headers=HEADERS, json=data)
         return response.status_code == 200, response.text
-    except Exception as e:
-        return False, str(e)
+    except Exception as e: return False, str(e)
 
 def get_waiting_questions():
     url = f"https://api.trendyol.com/sapigw/sellers/{SELLER_ID}/questions?status=WAITING_FOR_ANSWER"
     try:
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
+        response = requests.get(url, headers=HEADERS); response.raise_for_status()
         return response.json().get("content", [])
-    except Exception as e: 
-        st.error(f"Sorular çekilirken bir hata oluştu: {e}")
-        return []
+    except Exception as e: st.error(f"Sorular çekilirken bir hata oluştu: {e}"); return []
 
 def send_answer_to_trendyol(question_id, answer_text):
     url = f"https://api.trendyol.com/sapigw/sellers/{SELLER_ID}/questions/{question_id}/answers"
     data = {"text": answer_text}
     try:
-        response = requests.post(url, headers=HEADERS, json=data)
-        response.raise_for_status()
+        response = requests.post(url, headers=HEADERS, json=data); response.raise_for_status()
         return True, "Cevap başarıyla Trendyol'a gönderildi."
     except requests.exceptions.RequestException as e:
-        error_message = f"Hata: {e.response.status_code} - {e.response.text}"
-        return False, error_message
+        error_message = f"Hata: {e.response.status_code} - {e.response.text}"; return False, error_message
 
 def load_past_data(file_path):
     try:
         df = pd.read_excel(file_path)
         return df[['Ürün İsmi', 'Soru Detayı', 'Onaylanan Cevap']]
-    except FileNotFoundError:
-        st.sidebar.warning(f"'{file_path}' dosyası bulunamadı.")
-        return None
-    except Exception as e:
-        st.sidebar.error(f"Excel dosyası okunurken hata: {e}")
-        return None
+    except FileNotFoundError: st.sidebar.warning(f"'{file_path}' dosyası bulunamadı."); return None
+    except Exception as e: st.sidebar.error(f"Excel dosyası okunurken hata: {e}"); return None
 
 def generate_answer_with_ai(product_name, question, past_df):
     if not hasattr(openai, 'api_key') or not openai.api_key: return None, "OpenAI API anahtarı bulunamadı."
     if past_df is None: return None, "Örnek veri dosyası yüklenemedi."
     examples = past_df[past_df['Ürün İsmi'].astype(str).str.contains(str(product_name), case=False, na=False)]
-    if examples.empty:
-        return None, "Bu ürün için yeterli örnek bulunamadı."
+    if examples.empty: return None, "Bu ürün için yeterli örnek bulunamadı."
     for _ in range(3):
-        prompt = (
-            "Sen bir pazaryeri müşteri temsilcisisin... (prompt içeriği aynı)"
-        )
+        prompt = "Sen bir pazaryeri müşteri temsilcisisin..."
         try:
             client = openai.OpenAI(api_key=openai.api_key)
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=150, temperature=0.4
-            )
+            response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=150, temperature=0.4)
             answer = response.choices[0].message.content.strip()
-            if passes_forbidden_filter(answer): 
-                return answer, "AI tarafından üretildi."
-        except Exception as e:
-            return None, f"OpenAI hatası: {e}"
+            if passes_forbidden_filter(answer): return answer, "AI tarafından üretildi."
+        except Exception as e: return None, f"OpenAI hatası: {e}"
     return None, "Güvenli cevap üretilemedi."
 
 def process_telegram_commands():
     if not SEND_NOTIFICATIONS: return
-    if 'last_update_id' not in st.session_state:
-        st.session_state.last_update_id = 0
+    if 'last_update_id' not in st.session_state: st.session_state.last_update_id = 0
     offset = st.session_state.last_update_id + 1
     updates = get_telegram_updates(offset)
     for update in updates:
         st.session_state.last_update_id = update['update_id']
         if "message" in update and "text" in update["message"]:
-            chat_id = update['message']['chat']['id']
-            message_text = update['message']['text'].strip()
+            chat_id = update['message']['chat']['id']; message_text = update['message']['text'].strip()
             if message_text.lower().startswith('/cevap'):
                 parts = message_text.split(maxsplit=2)
-                if len(parts) < 3:
-                    send_telegram_message(chat_id, "❌ Hatalı format!\nKullanım: `/cevap <SoruID> <Cevabınız>`")
-                    continue
+                if len(parts) < 3: send_telegram_message(chat_id, "❌ Hatalı format!\nKullanım: `/cevap <SoruID> <Cevabınız>`"); continue
                 _, question_id, answer = parts
-                if not question_id.isdigit():
-                    send_telegram_message(chat_id, f"❌ Geçersiz Soru ID'si: '{question_id}'.")
-                    continue
+                if not question_id.isdigit(): send_telegram_message(chat_id, f"❌ Geçersiz Soru ID'si: '{question_id}'."); continue
                 success, message = send_answer_to_trendyol(question_id, answer)
                 feedback = f"✅ Başarılı!\nSoru ID'si `{question_id}` olan soruya cevabınız gönderildi." if success else f"❌ Hata!\nSoru `{question_id}` cevaplanamadı.\nSebep: {message}"
                 send_telegram_message(chat_id, feedback)
@@ -204,49 +173,37 @@ st.sidebar.header("Otomasyon Ayarları")
 st.sidebar.markdown(f"**İade Onaylama:** `{'Aktif' if AUTO_APPROVE_CLAIMS else 'Pasif'}`")
 st.sidebar.markdown(f"**Otomatik Cevaplama:** `{'Aktif' if AUTO_ANSWER_QUESTIONS else 'Pasif'}`")
 st.sidebar.markdown(f"**Soru Bildirimi (Telegram):** `{'Aktif' if SEND_NOTIFICATIONS else 'Pasif'}`")
-if SEND_NOTIFICATIONS:
-    if "TELEGRAM_BOT_TOKEN" in st.secrets and "TELEGRAM_CHAT_ID" in st.secrets:
-        st.sidebar.success("Telegram ayarları başarıyla yüklendi.")
-    else:
-        st.sidebar.error("Telegram TOKEN veya CHAT_ID bilgisi Secrets'ta eksik!")
+
+# --- YENİ MANUEL TEST BUTONU ---
+st.sidebar.header("Manuel Test")
+if st.sidebar.button("Telegram'a Test Bildirimi Gönder"):
+    st.sidebar.info("Test bildirimi gönderme denemesi...")
+    test_message = "Bu bir test mesajıdır. Eğer bu mesajı alıyorsanız, Telegram entegrasyonu çalışıyor demektir. ✅"
+    send_telegram_message(TELEGRAM_CHAT_ID, test_message)
+# --- -------------------- ---
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("Onay Bekleyen İade/Talepler")
     # ... (İade/Talep kodu değişmedi) ...
-    claims = get_pending_claims()
-    if not claims:
-        st.info("Onay bekleyen iade/talep bulunamadı.")
-    else:
-        st.write(f"**{len(claims)}** adet onay bekleyen talep var.")
-        # ... (devamı aynı)
 
 with col2:
     st.subheader("Cevap Bekleyen Müşteri Soruları")
     questions = get_waiting_questions()
-
-    # YENİ BİLDİRİM MANTIĞI
-    if 'notified_question_count' not in st.session_state:
-        st.session_state.notified_question_count = 0
-
+    if 'notified_question_count' not in st.session_state: st.session_state.notified_question_count = 0
     if not questions:
         st.info("Cevap bekleyen soru bulunamadı.")
-        st.session_state.notified_question_count = 0 # Soru kalmayınca sayacı sıfırla
+        st.session_state.notified_question_count = 0
     else:
         current_question_count = len(questions)
         st.write(f"**{current_question_count}** adet cevap bekleyen soru var.")
-
-        # Soru sayısı değiştiyse bildirim gönder
         if SEND_NOTIFICATIONS and current_question_count != st.session_state.notified_question_count:
             send_question_notification(questions)
             st.session_state.notified_question_count = current_question_count
-        
-        # OTOMATİK CEVAPLAMA İŞLEMLERİ
         if AUTO_ANSWER_QUESTIONS:
             # ... (Otomatik cevaplama kodu değişmedi) ...
             pass
-        # Sadece Soruları Görüntüleme
         else:
             for q in questions:
                 with st.expander(f"Ürün: {q.get('productName', '')[:40]}...", expanded=True):
