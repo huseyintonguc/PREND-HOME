@@ -26,7 +26,7 @@ if not STORES:
     st.stop()
 
 # Sayfa otomatik yenileme
-st_autorefresh(interval=60 * 1000, key="data_fetch_refresher") # Çoklu mağaza için yenileme süresini 1 dakikaya çıkardık
+st_autorefresh(interval=60 * 1000, key="data_fetch_refresher")
 
 # --- Ortak Fonksiyonlar ---
 
@@ -39,13 +39,6 @@ def get_headers(api_key, api_secret):
         "Content-Type": "application/json",
         "User-Agent": "MultiStorePanel/1.0"
     }
-
-# ... (Diğer tüm fonksiyonlar - passes_forbidden_filter, load_past_data vb. - buraya eklenecek ve güncellenecek) ...
-# ... (Fonksiyonların tam listesi aşağıda verilmiştir, bu sadece bir yer tutucudur) ...
-
-# <================================================================================>
-# <--- Tüm Fonksiyonların Güncellenmiş Halleri (Mağaza Bilgilerini Parametre Alan) --->
-# <================================================================================>
 
 FORBIDDEN_PATTERNS = [
     r"http[s]?://", r"\bwww\.", r"\.com\b", r"\.net\b", r"\.org\b",
@@ -68,7 +61,7 @@ def send_telegram_message(message, chat_id=None):
     try:
         requests.post(url, json=payload, timeout=5)
     except Exception:
-        pass # Hata durumunda arayüzü kirletme
+        pass
 
 def process_telegram_updates(stores_map):
     if 'last_update_id' not in st.session_state: st.session_state.last_update_id = 0
@@ -161,7 +154,6 @@ def send_answer(store, question_id, answer_text):
     except Exception as e: return False, str(e)
 
 def safe_generate_answer(product_name, question, past_df, min_examples=1):
-    # Bu fonksiyon mağazadan bağımsız olduğu için aynı kalabilir
     if not openai.api_key: return None, "OpenAI API anahtarı bulunamadı."
     if past_df is None or past_df.empty: return None, "Örnek veri dosyası bulunamadı."
     
@@ -170,7 +162,18 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
     if len(examples) < min_examples:
         return None, f"Örnek sayısı yetersiz ({len(examples)}/{min_examples})."
     
-    prompt = "..." # (Prompt içeriği aynı kaldığı için kısalttım)
+    prompt = (
+        "Sen bir pazaryeri müşteri temsilcisisin. Aşağıdaki soruya, yalnızca verilen örnek cevapların bilgisi ve "
+        "genel işleyiş kurallarını kullanarak KISA, NAZİK ve NET bir cevap ver. "
+        "ASLA dış web sitesi, link, sosyal medya veya harici kanal yönlendirmesi yapma. "
+        "Bilmiyorsan veya örneklerde cevap yoksa cevap üretme.\n\n"
+        f"Ürün Adı: {product_name}\nMüşteri Sorusu: {question}\n\n"
+        "--- Örnek Geçmiş Cevaplar ---\n"
+    )
+    for _, row in examples.head(5).iterrows():
+        prompt += f"Soru: {row['Soru Detayı']}\nCevap: {row['Onaylanan Cevap']}\n---\n"
+    prompt += "Oluşturulacak Cevap (harici yönlendirme YASAK):"
+
     try:
         client = openai.OpenAI(api_key=openai.api_key)
         response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=150, temperature=0.4)
@@ -190,18 +193,15 @@ if past_df is not None:
 else:
     st.sidebar.warning("`soru_cevap_ornekleri.xlsx` dosyası bulunamadı.")
 
-# Store name'e göre arama yapabilmek için map oluştur
 stores_map = {store['name']: store for store in STORES}
 process_telegram_updates(stores_map)
 
-# Mağazaları sekmeler halinde göster
 store_tabs = st.tabs([s['name'] for s in STORES])
 
 for i, store in enumerate(STORES):
     with store_tabs[i]:
         st.header(f"🏪 {store['name']} Mağazası Paneli")
         
-        # Mağazaya özel ayarları göster
         st.markdown(
             f"**İade Onaylama:** `{'Aktif' if store.get('auto_approve_claims') else 'Pasif'}` | "
             f"**Soru Cevaplama:** `{'Aktif' if store.get('auto_answer_questions') else 'Pasif'}` | "
@@ -213,19 +213,32 @@ for i, store in enumerate(STORES):
         with col1:
             st.subheader("Onay Bekleyen İade/Talepler")
             claims = get_pending_claims(store)
-            if not claims: st.info("Onay bekleyen iade/talep bulunamadı.")
+            if not claims: 
+                st.info("Onay bekleyen iade/talep bulunamadı.")
             else:
+                st.write(f"**{len(claims)}** adet onay bekleyen talep var.")
                 for claim in claims:
-                    # ... (İade/Talep gösterme ve işleme mantığı - store parametresi eklendi) ...
-                    if store.get('auto_approve_claims'):
-                        # Otomatik onaylama...
-                        pass # Kodun kısalığı için bu kısmı çıkardım, isterseniz ekleyebiliriz
+                    # <--- DÜZELTME: Önceki kodda eksik olan iade listeleme ve onaylama döngüsü eklendi --->
+                    with st.expander(f"Sipariş No: {claim.get('orderNumber')} - Talep ID: {claim.get('id')}", expanded=True):
+                        st.write(f"**Talep Nedeni:** {claim.get('claimType', {}).get('name', 'Belirtilmemiş')}")
+                        st.write(f"**Durum:** {claim.get('status')}")
+                        if store.get('auto_approve_claims'):
+                            with st.spinner("Otomatik olarak onaylanıyor..."):
+                                item_ids = [item.get('id') for batch in claim.get('items', []) for item in batch.get('claimItems', [])]
+                                if item_ids:
+                                    success, message = approve_claim_items(store, claim.get('id'), item_ids)
+                                    if success: 
+                                        st.success("Talep başarıyla otomatik onaylandı.")
+                                        st.rerun()
+                                    else: 
+                                        st.error(f"Otomatik onay başarısız: {message}")
+                                else:
+                                    st.warning("Onaylanacak ürün kalemi bulunamadı.")
 
         with col2:
             st.subheader("Cevap Bekleyen Müşteri Soruları")
             questions = get_waiting_questions(store)
 
-            # Her yeni soru için ayrı Telegram bildirimi
             if questions and store.get('send_notifications'):
                 if 'notified_question_ids' not in st.session_state:
                     st.session_state.notified_question_ids = set()
@@ -244,9 +257,58 @@ for i, store in enumerate(STORES):
                         send_telegram_message(message)
                         st.session_state.notified_question_ids.add(q_id)
 
-            if not questions: st.info("Cevap bekleyen soru bulunamadı.")
+            if not questions: 
+                st.info("Cevap bekleyen soru bulunamadı.")
             else:
-                # ... (Soruları gösterme ve işleme mantığı - store parametresi eklendi) ...
+                # <--- DÜZELTME: Önceki kodda eksik olan soru listeleme ve cevaplama döngüsü eklendi --->
+                st.write(f"**{len(questions)}** adet cevap bekleyen soru var.")
+                if 'questions_handled' not in st.session_state: st.session_state.questions_handled = []
+
                 for q in questions:
-                    # Otomatik cevaplama...
-                    pass # Kodun kısalığı için bu kısmı çıkardım, isterseniz ekleyebiliriz
+                    q_id = q.get("id")
+                    if q_id in st.session_state.questions_handled: continue
+                    with st.expander(f"Soru ID: {q_id} - Ürün: {q.get('productName', '')[:30]}...", expanded=True):
+                        st.markdown(f"**Soru:** *{q.get('text', '')}*")
+                        
+                        # Otomatik ve Manuel cevaplama mantığı
+                        is_auto_answer_active = store.get('auto_answer_questions', False)
+                        delay_minutes = store.get('delay_minutes', 5)
+
+                        if f"time_{q_id}" not in st.session_state: st.session_state[f"time_{q_id}"] = datetime.now()
+                        elapsed = datetime.now() - st.session_state[f"time_{q_id}"]
+
+                        if is_auto_answer_active:
+                            if delay_minutes == 0 or elapsed >= timedelta(minutes=delay_minutes):
+                                with st.spinner(f"Soru ID {q_id}: Otomatik cevap kontrol ediliyor..."):
+                                    answer, reason = safe_generate_answer(q.get("productName", ""), q.get("text", ""), past_df, min_examples=MIN_EXAMPLES)
+                                    if answer is None: 
+                                        st.warning(f"Otomatik cevap gönderilmedi: {reason}")
+                                        continue
+                                    st.info(f"Otomatik gönderilecek cevap:\n\n> {answer}")
+                                    success, message = send_answer(store, q_id, answer)
+                                    if success: 
+                                        st.success("Cevap başarıyla otomatik gönderildi.")
+                                        st.session_state.questions_handled.append(q_id)
+                                        st.rerun()
+                                    else: 
+                                        st.error(f"Cevap gönderilemedi: {message}")
+                            else:
+                                remaining_seconds = (timedelta(minutes=delay_minutes) - elapsed).total_seconds()
+                                st.warning(f"Bu soruya otomatik cevap yaklaşık **{int(remaining_seconds / 60)} dakika {int(remaining_seconds % 60)} saniye** içinde gönderilecek.")
+                        else: # Manuel mod
+                            suggestion, reason = safe_generate_answer(q.get("productName", ""), q.get("text", ""), past_df, min_examples=MIN_EXAMPLES)
+                            default_text = suggestion if suggestion is not None else ""
+                            if suggestion is None: st.info(f"Öneri üretilmedi: {reason}")
+                            cevap = st.text_area("Cevabınız:", value=default_text, key=f"manual_{store['name']}_{q_id}")
+                            if st.button(f"Cevabı Gönder (ID: {q_id})", key=f"btn_{store['name']}_{q_id}"):
+                                ok, why = passes_forbidden_filter(cevap)
+                                if not ok: st.error(why)
+                                elif not cevap.strip(): st.error("Boş cevap gönderilemez.")
+                                else:
+                                    success, message = send_answer(store, q_id, cevap)
+                                    if success: 
+                                        st.success("Cevap başarıyla gönderildi.")
+                                        st.session_state.questions_handled.append(q_id)
+                                        st.rerun()
+                                    else: 
+                                        st.error(f"Cevap gönderilemedi: {message}")
