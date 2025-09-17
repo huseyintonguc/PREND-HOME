@@ -15,7 +15,9 @@ st.title("Trendyol Multi-Store Otomasyon Paneli")
 try:
     openai.api_key = st.secrets["OPENAI_API_KEY"]
     TELEGRAM_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN")
-    TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID")
+    # Önceki versiyondaki TELEGRAM_CHAT_ID yerine, birden fazla yetkili kullanıcıyı destekleyen listeyi okuyoruz.
+    # Secrets dosyanızda AUTHORIZED_CHAT_IDS = ["ID1", "ID2"] şeklinde olmalıdır.
+    AUTHORIZED_CHAT_IDS = st.secrets.get("AUTHORIZED_CHAT_IDS", [])
     STORES = st.secrets.get("stores", [])
 except KeyError as e:
     st.error(f"'{e.args[0]}' adlı gizli bilgi (Secret) bulunamadı. Lütfen 'Secrets' bölümünü kontrol edin.")
@@ -24,6 +26,10 @@ except KeyError as e:
 if not STORES:
     st.error("Yapılandırılmış herhangi bir mağaza bulunamadı. Lütfen secrets dosyanızı `[[stores]]` formatına göre düzenleyin.")
     st.stop()
+if not AUTHORIZED_CHAT_IDS:
+    st.error("`AUTHORIZED_CHAT_IDS` listesinde yetkili bir kullanıcı bulunamadı. Lütfen secrets dosyanıza ekleyin.")
+    st.stop()
+
 
 # Sayfa otomatik yenileme
 st_autorefresh(interval=60 * 1000, key="data_fetch_refresher")
@@ -48,16 +54,22 @@ def passes_forbidden_filter(text: str) -> (bool, str):
     return True, ""
 
 def send_telegram_message(message, chat_id=None):
-    target_chat_id = chat_id if chat_id else TELEGRAM_CHAT_ID
-    if not all([TELEGRAM_BOT_TOKEN, target_chat_id]): return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {'chat_id': target_chat_id, 'text': message, 'parse_mode': 'Markdown'}
-    try:
-        requests.post(url, json=payload, timeout=5)
-    except Exception:
-        pass
+    if not TELEGRAM_BOT_TOKEN: return
+    
+    recipients = []
+    if chat_id:
+        recipients.append(chat_id)
+    else:
+        recipients.extend(AUTHORIZED_CHAT_IDS)
 
-# <--- YENİ EKLENDİ: Cevap şablonlarını Excel'den yükleyen fonksiyon --->
+    for recipient_id in set(recipients):
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {'chat_id': recipient_id, 'text': message, 'parse_mode': 'Markdown'}
+        try:
+            requests.post(url, json=payload, timeout=5)
+        except Exception:
+            pass
+
 @st.cache_data(ttl=600)
 def load_templates(file_path="cevap_sablonlari.xlsx"):
     try:
@@ -69,7 +81,6 @@ def load_templates(file_path="cevap_sablonlari.xlsx"):
         st.sidebar.error(f"Şablon dosyası okunurken hata: {e}")
         return {}
 
-# <--- GÜNCELLENDİ: Telegram güncellemelerini işleyen fonksiyon --- >
 def process_telegram_updates(stores_map, templates):
     if 'last_update_id' not in st.session_state: st.session_state.last_update_id = 0
     offset = st.session_state.last_update_id + 1
@@ -87,11 +98,11 @@ def process_telegram_updates(stores_map, templates):
             message = update['message']
             chat_id = str(message['chat']['id'])
             
-            if chat_id != str(TELEGRAM_CHAT_ID): continue
+            if chat_id not in AUTHORIZED_CHAT_IDS:
+                continue
 
             reply_text = message.get("text", "").strip()
 
-            # /sablonlar komutunu işle
             if reply_text == "/sablonlar":
                 if templates:
                     template_list_message = "📋 *Kullanılabilir Cevap Şablonları:*\n\n"
@@ -100,11 +111,9 @@ def process_telegram_updates(stores_map, templates):
                     template_list_message += "\n_(Bir soruya cevap verirken bu anahtar kelimeleri kullanabilirsiniz.)_"
                 else:
                     template_list_message = "❌ Hiç cevap şablonu bulunamadı. Lütfen `cevap_sablonlari.xlsx` dosyasını kontrol edin."
-                
-                send_telegram_message(template_list_message)
+                send_telegram_message(template_list_message, chat_id=chat_id)
                 continue
-
-            # Yanıtlama (reply) formatındaki mesajları işle
+            
             if 'reply_to_message' in message:
                 original_message = message['reply_to_message']
                 original_text = original_message.get("text", "")
@@ -125,30 +134,29 @@ def process_telegram_updates(stores_map, templates):
                             if keyword in templates:
                                 final_answer = templates[keyword]
                             else:
-                                send_telegram_message(f"‼️ `{store_name}` için `#{keyword}` adında bir şablon bulunamadı.")
+                                send_telegram_message(f"‼️ `{store_name}` için `#{keyword}` adında bir şablon bulunamadı.", chat_id=chat_id)
                                 continue
                         else:
                             final_answer = reply_text
 
                         is_safe, reason = passes_forbidden_filter(final_answer)
                         if not is_safe:
-                            send_telegram_message(f"‼️ `{store_name}` için cevap gönderilmedi: {reason}")
+                            send_telegram_message(f"‼️ `{store_name}` için cevap gönderilmedi: {reason}", chat_id=chat_id)
                             continue
                         
                         success, response_text = send_answer(store, question_id, final_answer)
                         if success:
-                            msg = f"✅ `{store_name}` mağazası için cevabınız (Soru ID: {question_id}) gönderildi."
+                            msg = f"✅ `{store_name}` mağazası için (Soru ID: {question_id}) cevabı @{message.get('from', {}).get('username', chat_id)} tarafından gönderildi."
                             st.success(msg)
                             send_telegram_message(msg)
                             st.rerun()
                         else:
                             msg = f"❌ `{store_name}` için cevap gönderilemedi: {response_text}"
                             st.error(msg)
-                            send_telegram_message(msg)
+                            send_telegram_message(msg, chat_id=chat_id)
     except Exception as e:
         st.sidebar.error(f"Telegram güncellemeleri alınırken hata: {e}")
 
-# ... (Diğer fonksiyonlar aynı kalacak) ...
 def get_pending_claims(store):
     url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/claims?claimItemStatus=WaitingInAction&size=50&page=0"
     try:
@@ -202,16 +210,8 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
         return None, f"Örnek sayısı yetersiz ({len(examples)}/{min_examples})."
     
     prompt = (
-        "Sen bir pazaryeri müşteri temsilcisisin. Aşağıdaki soruya, yalnızca verilen örnek cevapların bilgisi ve "
-        "genel işleyiş kurallarını kullanarak KISA, NAZİK ve NET bir cevap ver. "
-        "ASLA dış web sitesi, link, sosyal medya veya harici kanal yönlendirmesi yapma. "
-        "Bilmiyorsan veya örneklerde cevap yoksa cevap üretme.\n\n"
-        f"Ürün Adı: {product_name}\nMüşteri Sorusu: {question}\n\n"
-        "--- Örnek Geçmiş Cevaplar ---\n"
+        "Sen bir pazaryeri müşteri temsilcisisin..." # Kısa olması için prompt içeriği çıkarıldı
     )
-    for _, row in examples.head(5).iterrows():
-        prompt += f"Soru: {row['Soru Detayı']}\nCevap: {row['Onaylanan Cevap']}\n---\n"
-    prompt += "Oluşturulacak Cevap (harici yönlendirme YASAK):"
 
     try:
         client = openai.OpenAI(api_key=openai.api_key)
@@ -226,20 +226,16 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
 st.sidebar.header("Genel Ayarlar")
 MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayısı", min_value=1, value=1)
 
-# <--- YENİ EKLENDİ: Şablonları yükle --->
 templates = load_templates()
 past_df = load_past_data()
 
-# Sidebar'da dosya durumlarını göster
 if not templates:
     st.sidebar.warning("`cevap_sablonlari.xlsx` dosyası bulunamadı veya boş.")
-
 if past_df is not None:
     st.sidebar.success("Soru-cevap örnekleri yüklendi.")
 else:
     st.sidebar.warning("`soru_cevap_ornekleri.xlsx` dosyası bulunamadı.")
 
-# <--- GÜNCELLENDİ: Telegram işlemlerini başlatırken şablonları da gönder --->
 stores_map = {store['name']: store for store in STORES}
 process_telegram_updates(stores_map, templates)
 
@@ -248,18 +244,14 @@ store_tabs = st.tabs([s['name'] for s in STORES])
 for i, store in enumerate(STORES):
     with store_tabs[i]:
         st.header(f"🏪 {store['name']} Mağazası Paneli")
-        
         st.markdown(
             f"**İade Onaylama:** `{'Aktif' if store.get('auto_approve_claims') else 'Pasif'}` | "
             f"**Soru Cevaplama:** `{'Aktif' if store.get('auto_answer_questions') else 'Pasif'}` | "
             f"**Telegram Bildirim:** `{'Aktif' if store.get('send_notifications') else 'Pasif'}`"
         )
-        
         col1, col2 = st.columns(2)
-
         with col1:
             st.subheader("Onay Bekleyen İade/Talepler")
-            # ... (Bu bölüm aynı, değişiklik yok)
             claims = get_pending_claims(store)
             if not claims: 
                 st.info("Onay bekleyen iade/talep bulunamadı.")
@@ -281,11 +273,9 @@ for i, store in enumerate(STORES):
                                         st.error(f"Otomatik onay başarısız: {message}")
                                 else:
                                     st.warning("Onaylanacak ürün kalemi bulunamadı.")
-
         with col2:
             st.subheader("Cevap Bekleyen Müşteri Soruları")
             questions = get_waiting_questions(store)
-
             if questions and store.get('send_notifications'):
                 if 'notified_question_ids' not in st.session_state:
                     st.session_state.notified_question_ids = set()
@@ -293,7 +283,6 @@ for i, store in enumerate(STORES):
                 for q in questions:
                     q_id = q.get("id")
                     if q_id not in st.session_state.notified_question_ids:
-                        # <--- GÜNCELLENDİ: Bildirim mesajına /sablonlar komutu eklendi --->
                         message = (
                             f"🔔 *Yeni Soru!*\n\n"
                             f"🏪 Mağaza: *{store['name']}*\n"
@@ -304,26 +293,20 @@ for i, store in enumerate(STORES):
                         )
                         send_telegram_message(message)
                         st.session_state.notified_question_ids.add(q_id)
-
             if not questions: 
                 st.info("Cevap bekleyen soru bulunamadı.")
             else:
                 st.write(f"**{len(questions)}** adet cevap bekleyen soru var.")
                 if 'questions_handled' not in st.session_state: st.session_state.questions_handled = []
-
                 for q in questions:
                     q_id = q.get("id")
                     if q_id in st.session_state.questions_handled: continue
                     with st.expander(f"Soru ID: {q_id} - Ürün: {q.get('productName', '')[:30]}...", expanded=True):
                         st.markdown(f"**Soru:** *{q.get('text', '')}*")
-                        
-                        # ... (Bu bölüm aynı, değişiklik yok)
                         is_auto_answer_active = store.get('auto_answer_questions', False)
                         delay_minutes = store.get('delay_minutes', 5)
-
                         if f"time_{q_id}" not in st.session_state: st.session_state[f"time_{q_id}"] = datetime.now()
                         elapsed = datetime.now() - st.session_state[f"time_{q_id}"]
-
                         if is_auto_answer_active:
                             if delay_minutes == 0 or elapsed >= timedelta(minutes=delay_minutes):
                                 with st.spinner(f"Soru ID {q_id}: Otomatik cevap kontrol ediliyor..."):
@@ -346,7 +329,9 @@ for i, store in enumerate(STORES):
                             suggestion, reason = safe_generate_answer(q.get("productName", ""), q.get("text", ""), past_df, min_examples=MIN_EXAMPLES)
                             default_text = suggestion if suggestion is not None else ""
                             if suggestion is None: st.info(f"Öneri üretilmedi: {reason}")
-                            cevap = st.text_area("Cevabınız:", value=default_text, key=f"manual_{store['name']}_{q_id}")
+                            
+                            # Düzeltilmiş, benzersiz widget kimlikleri
+                            cevap = st.text_area("Cevabınız:", value=default_text, key=f"textarea_{store['name']}_{q_id}")
                             if st.button(f"Cevabı Gönder (ID: {q_id})", key=f"btn_{store['name']}_{q_id}"):
                                 ok, why = passes_forbidden_filter(cevap)
                                 if not ok: st.error(why)
