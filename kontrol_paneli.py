@@ -17,9 +17,17 @@ try:
     API_KEY = st.secrets["API_KEY"]
     API_SECRET = st.secrets["API_SECRET"]
     openai.api_key = st.secrets["OPENAI_API_KEY"]
+    
+    # Otomasyon Ayarları
     AUTO_APPROVE_CLAIMS = st.secrets.get("AUTO_APPROVE_CLAIMS", False)
     AUTO_ANSWER_QUESTIONS = st.secrets.get("AUTO_ANSWER_QUESTIONS", False)
     DELAY_MINUTES = st.secrets.get("DELAY_MINUTES", 5)
+
+    # Telegram Ayarları <--- YENİ EKLENDİ
+    SEND_NOTIFICATIONS = st.secrets.get("SEND_NOTIFICATIONS", False)
+    TELEGRAM_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID")
+
 except KeyError as e:
     st.error(f"'{e.args[0]}' adlı gizli bilgi (Secret) bulunamadı. Lütfen 'Manage app' -> 'Secrets' bölümünü kontrol edin.")
     st.stop()
@@ -49,12 +57,12 @@ MIN_EXAMPLES = st.sidebar.number_input(
 
 # Yasaklı yönlendirme kalıpları (url, sosyal ağ, web vb.)
 FORBIDDEN_PATTERNS = [
-    r"http[s]?://",            # URL
-    r"\bwww\.",                # www.
+    r"http[s]?://",         # URL
+    r"\bwww\.",             # www.
     r"\.com\b", r"\.net\b", r"\.org\b",
-    r"\blink\b",               # link kelimesi
-    r"\bsite\b",               # site kelimesi
-    r"\bweb\w*\b",             # web, websitesi, websitemiz, webden, webe...
+    r"\blink\b",             # link kelimesi
+    r"\bsite\b",             # site kelimesi
+    r"\bweb\w*\b",           # web, websitesi, websitemiz, webden, webe...
     r"\binstagram\b",
     r"\bwhats?app\b",
     r"\bdm\b",
@@ -67,6 +75,25 @@ def passes_forbidden_filter(text: str) -> (bool, str):
         if re.search(pat, text, flags=re.IGNORECASE):
             return False, f"YASAK: Cevap yönlendirme içeriyor ({pat})."
     return True, ""
+
+# --- FONKSİYONLAR: TELEGRAM BİLDİRİM ---  # <--- YENİ EKLENDİ
+def send_telegram_message(message):
+    """Telegram'a bildirim gönderir."""
+    if not all([SEND_NOTIFICATIONS, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
+        return 
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': message,
+        'parse_mode': 'Markdown'
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=5)
+        if response.status_code != 200:
+            st.sidebar.warning(f"Telegram bildirimi gönderilemedi: {response.text}")
+    except Exception as e:
+        st.sidebar.error(f"Telegram'a bağlanırken hata oluştu: {e}")
 
 # --- FONKSİYONLAR: İADE/TALEP YÖNETİMİ ---
 def get_pending_claims():
@@ -111,14 +138,8 @@ def get_waiting_questions():
         return []
 
 def safe_generate_answer(product_name, question, past_df, min_examples=1, max_retries=3):
-    """
-    Otomatik cevap üretir; yasaklı kelimeler çıkarsa max_retries kadar tekrar üretir.
-    Örnek sayısı min_examples'tan azsa None döndürür.
-    """
     if not openai.api_key:
         return None, "OpenAI API anahtarı bulunamadı."
-
-    # İlgili ürüne ait örnekler
     examples = pd.DataFrame()
     if past_df is not None:
         mask = past_df['Ürün İsmi'].astype(str).str.contains(str(product_name), case=False, na=False)
@@ -128,7 +149,6 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1, max_re
         return None, f"Örnek sayısı yetersiz ({len(examples)}/{min_examples}). Otomatik cevap gönderilmeyecek."
 
     for attempt in range(max_retries):
-        # Modeli yönlendirme yapmaması için talimatla kısıtla
         prompt = (
             "Sen bir pazaryeri müşteri temsilcisisin. Aşağıdaki soruya, yalnızca verilen örnek cevapların bilgisi ve "
             "genel işleyiş kurallarını kullanarak KISA, NAZİK ve NET bir cevap ver. "
@@ -143,7 +163,6 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1, max_re
         prompt += "Oluşturulacak Cevap (harici yönlendirme YASAK):"
 
         try:
-            # OpenAI çağrısı (senin mevcut yapınla aynı client kullanımı) :contentReference[oaicite:1]{index=1}
             client = openai.OpenAI(api_key=openai.api_key)
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -152,10 +171,9 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1, max_re
                 temperature=0.4
             )
             answer = response.choices[0].message.content.strip()
-
             ok, reason = passes_forbidden_filter(answer)
             if ok:
-                return answer, ""  # Güvenli cevap
+                return answer, "" 
             else:
                 st.warning(f"Yasaklı ifade tespit edildi, tekrar deneniyor... (Deneme {attempt+1}/{max_retries})")
                 continue
@@ -181,6 +199,7 @@ past_df = load_past_data(EXCEL_FILE_NAME)
 st.sidebar.header("Otomasyon Durumu")
 st.sidebar.markdown(f"**İade Onaylama:** `{'Aktif' if AUTO_APPROVE_CLAIMS else 'Pasif'}`")
 st.sidebar.markdown(f"**Soru Cevaplama:** `{'Aktif' if AUTO_ANSWER_QUESTIONS else 'Pasif'}`")
+st.sidebar.markdown(f"**Telegram Bildirim:** `{'Aktif' if SEND_NOTIFICATIONS else 'Pasif'}`") # <--- YENİ EKLENDİ
 if AUTO_ANSWER_QUESTIONS:
     st.sidebar.markdown(f"**Cevap Gecikmesi:** `{DELAY_MINUTES} dakika`")
 
@@ -223,6 +242,26 @@ with col2:
     st.subheader("Cevap Bekleyen Müşteri Soruları")
     try:
         questions = get_waiting_questions()
+
+        # --- YENİ EKLENEN TELEGRAM BİLDİRİM KONTROLÜ ---
+        if questions:
+            if 'notified_question_ids' not in st.session_state:
+                st.session_state.notified_question_ids = set()
+
+            current_question_ids = {q['id'] for q in questions}
+            new_question_ids = current_question_ids - st.session_state.notified_question_ids
+
+            if new_question_ids:
+                message = (
+                    f"📢 **Trendyol'da Yeni Sorularınız Var!**\n\n"
+                    f"Panelinize **{len(new_question_ids)}** adet yeni soru geldi. "
+                    f"Lütfen kontrol ediniz."
+                )
+                send_telegram_message(message)
+                # Bildirimi gönderilen soruları hafızaya al
+                st.session_state.notified_question_ids.update(new_question_ids)
+        # --- TELEGRAM BİLDİRİM KONTROLÜ SONU ---
+
         if not questions:
             st.info("Cevap bekleyen soru bulunamadı.")
         else:
@@ -245,7 +284,6 @@ with col2:
                     if AUTO_ANSWER_QUESTIONS:
                         if DELAY_MINUTES == 0 or elapsed >= timedelta(minutes=DELAY_MINUTES):
                             with st.spinner(f"Soru ID {q_id}: Otomatik cevap kontrol ediliyor..."):
-                                # Güvenli üretim (yasaklıysa otomatik yeniden üretir)
                                 answer, reason = safe_generate_answer(
                                     q.get("productName", ""),
                                     q.get("text", ""),
@@ -272,7 +310,6 @@ with col2:
                             st.warning(f"Bu soruya otomatik cevap yaklaşık **{remaining_minutes} dakika {remaining_sec} saniye** içinde gönderilecek.")
 
                     else:  # Manuel mod
-                        # Öneri yalnızca yeterli örnek varsa ve güvenli üretilebiliyorsa oluşturulsun
                         suggestion, reason = safe_generate_answer(
                             q.get("productName", ""),
                             q.get("text", ""),
@@ -286,7 +323,6 @@ with col2:
 
                         cevap = st.text_area("Cevabınız:", value=default_text, key=f"manual_{q_id}")
 
-                        # Manuelde de gönderim öncesi yasak filtre
                         if st.button(f"Cevabı Gönder (ID: {q_id})", key=f"btn_{q_id}"):
                             ok, why = passes_forbidden_filter(cevap)
                             if not ok:
