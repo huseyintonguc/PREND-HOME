@@ -57,6 +57,7 @@ def send_telegram_message(message, chat_id=None):
     except Exception:
         pass
 
+# <--- YENİ EKLENDİ: Cevap şablonlarını Excel'den yükleyen fonksiyon --->
 @st.cache_data(ttl=600)
 def load_templates(file_path="cevap_sablonlari.xlsx"):
     try:
@@ -68,6 +69,7 @@ def load_templates(file_path="cevap_sablonlari.xlsx"):
         st.sidebar.error(f"Şablon dosyası okunurken hata: {e}")
         return {}
 
+# <--- GÜNCELLENDİ: Telegram güncellemelerini işleyen fonksiyon --- >
 def process_telegram_updates(stores_map, templates):
     if 'last_update_id' not in st.session_state: st.session_state.last_update_id = 0
     offset = st.session_state.last_update_id + 1
@@ -89,6 +91,7 @@ def process_telegram_updates(stores_map, templates):
 
             reply_text = message.get("text", "").strip()
 
+            # /sablonlar komutunu işle
             if reply_text == "/sablonlar":
                 if templates:
                     template_list_message = "📋 *Kullanılabilir Cevap Şablonları:*\n\n"
@@ -101,6 +104,7 @@ def process_telegram_updates(stores_map, templates):
                 send_telegram_message(template_list_message)
                 continue
 
+            # Yanıtlama (reply) formatındaki mesajları işle
             if 'reply_to_message' in message:
                 original_message = message['reply_to_message']
                 original_text = original_message.get("text", "")
@@ -120,7 +124,6 @@ def process_telegram_updates(stores_map, templates):
                             keyword = reply_text[1:].lower()
                             if keyword in templates:
                                 final_answer = templates[keyword]
-                                st.info(f"`{store_name}` için `#{keyword}` şablonu kullanılıyor.")
                             else:
                                 send_telegram_message(f"‼️ `{store_name}` için `#{keyword}` adında bir şablon bulunamadı.")
                                 continue
@@ -145,6 +148,7 @@ def process_telegram_updates(stores_map, templates):
     except Exception as e:
         st.sidebar.error(f"Telegram güncellemeleri alınırken hata: {e}")
 
+# ... (Diğer fonksiyonlar aynı kalacak) ...
 def get_pending_claims(store):
     url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/claims?claimItemStatus=WaitingInAction&size=50&page=0"
     try:
@@ -222,6 +226,7 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
 st.sidebar.header("Genel Ayarlar")
 MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayısı", min_value=1, value=1)
 
+# <--- YENİ EKLENDİ: Şablonları yükle --->
 templates = load_templates()
 past_df = load_past_data()
 
@@ -234,6 +239,7 @@ if past_df is not None:
 else:
     st.sidebar.warning("`soru_cevap_ornekleri.xlsx` dosyası bulunamadı.")
 
+# <--- GÜNCELLENDİ: Telegram işlemlerini başlatırken şablonları da gönder --->
 stores_map = {store['name']: store for store in STORES}
 process_telegram_updates(stores_map, templates)
 
@@ -253,6 +259,7 @@ for i, store in enumerate(STORES):
 
         with col1:
             st.subheader("Onay Bekleyen İade/Talepler")
+            # ... (Bu bölüm aynı, değişiklik yok)
             claims = get_pending_claims(store)
             if not claims: 
                 st.info("Onay bekleyen iade/talep bulunamadı.")
@@ -286,13 +293,14 @@ for i, store in enumerate(STORES):
                 for q in questions:
                     q_id = q.get("id")
                     if q_id not in st.session_state.notified_question_ids:
+                        # <--- GÜNCELLENDİ: Bildirim mesajına /sablonlar komutu eklendi --->
                         message = (
                             f"🔔 *Yeni Soru!*\n\n"
                             f"🏪 Mağaza: *{store['name']}*\n"
                             f"📦 Ürün: {q.get('productName', '')}\n"
                             f"❓ Soru: {q.get('text', '')}\n"
                             f"(Soru ID: {q_id})\n\n"
-                            f"👇 *Cevaplamak için bu mesaja yanıt verin veya `#keyword` kullanın. Tüm keywordleri görmek için `/sablonlar` yazın.*"
+                            f"👇 *Cevaplamak için bu mesaja yanıt verin veya `#keyword` kullanın. Tüm şablonları görmek için `/sablonlar` yazın.*"
                         )
                         send_telegram_message(message)
                         st.session_state.notified_question_ids.add(q_id)
@@ -309,6 +317,7 @@ for i, store in enumerate(STORES):
                     with st.expander(f"Soru ID: {q_id} - Ürün: {q.get('productName', '')[:30]}...", expanded=True):
                         st.markdown(f"**Soru:** *{q.get('text', '')}*")
                         
+                        # ... (Bu bölüm aynı, değişiklik yok)
                         is_auto_answer_active = store.get('auto_answer_questions', False)
                         delay_minutes = store.get('delay_minutes', 5)
 
