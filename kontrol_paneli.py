@@ -163,7 +163,7 @@ def process_telegram_updates(stores_map, templates):
     except Exception as e:
         st.sidebar.error(f"Telegram güncellemeleri alınırken hata: {e}")
 
-# --- GÜNLÜK KARGO RAPORU FONKSİYONLARI (DÜZELTİLMİŞ) ---
+# --- RAPORLAMA FONKSİYONLARI ---
 
 def get_and_filter_orders_for_report(store, target_date, api_query_status, final_filter_status):
     """Geniş bir aralıkta sorgulama yapıp, sonuçları yerel olarak filtreler."""
@@ -335,7 +335,6 @@ st.sidebar.header("Manuel Raporlama")
 selected_date = st.sidebar.date_input("Rapor için bir tarih seçin", datetime.now())
 if st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder"):
     with st.sidebar.spinner("Teslimat raporu oluşturuluyor..."):
-        # Sorguyu 'Shipped' ile yap, sonucu 'Delivered' olanları kontrol et
         report_text = generate_report_message(STORES, selected_date, "Shipped", "Delivered", title="Tarihli Teslimat Raporu")
         send_telegram_message(report_text)
         st.sidebar.success(f"{selected_date.strftime('%d-%m-%Y')} tarihli rapor gönderildi!")
