@@ -47,18 +47,6 @@ def get_headers(api_key, api_secret):
     encoded_credentials = base64.b64encode(credentials.encode()).decode()
     return {"Authorization": f"Basic {encoded_credentials}", "Content-Type": "application/json", "User-Agent": "MultiStorePanel/1.0"}
 
-FORBIDDEN_PATTERNS = [
-    r"http[s]?://", r"\bwww\.", r"\.com\b", r"\.net\b", r"\.org\b",
-    r"\blink\b", r"\bsite\b", r"\bweb\w*\b", r"\binstagram\b",
-    r"\bwhats?app\b", r"\bdm\b", r"\btelegram\b"
-]
-
-def passes_forbidden_filter(text: str) -> (bool, str):
-    for pat in FORBIDDEN_PATTERNS:
-        if re.search(pat, text, flags=re.IGNORECASE):
-            return False, f"YASAK: Cevap yönlendirme içeriyor ({pat})."
-    return True, ""
-
 def send_telegram_message(message, chat_id=None):
     if not TELEGRAM_BOT_TOKEN: return
     
@@ -72,7 +60,7 @@ def send_telegram_message(message, chat_id=None):
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {'chat_id': recipient_id, 'text': message, 'parse_mode': 'Markdown'}
         try:
-            requests.post(url, json=payload, timeout=5)
+            requests.post(url, json=payload, timeout=10)
         except Exception:
             pass
 
@@ -208,7 +196,7 @@ def get_and_filter_orders_for_report(store, target_date, api_query_status, final
 
     filtered_packages = []
     for pkg in all_packages:
-        if pkg and pkg.get("status") == final_filter_status:
+        if isinstance(pkg, dict) and pkg.get("status") == final_filter_status:
             modified_date_ts = pkg.get("packageLastModifiedDate")
             if modified_date_ts and start_of_target_day_ts <= modified_date_ts <= end_of_target_day_ts:
                 filtered_packages.append(pkg)
@@ -326,20 +314,18 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
 
 # --- ANA UYGULAMA MANTIĞI ---
 
+# --- SIDEBAR (KENAR ÇUBUĞU) ---
 st.sidebar.header("Genel Ayarlar")
 MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayısı", min_value=1, value=1)
 
-# MANUEL RAPOR BÖLÜMÜ
 st.sidebar.header("Manuel Raporlama")
 selected_date = st.sidebar.date_input("Rapor için bir tarih seçin", datetime.now())
-if st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder"):
-    with st.sidebar.spinner("Teslimat raporu oluşturuluyor..."):
-        report_text = generate_report_message(STORES, selected_date, "Shipped", "Delivered", title="Tarihli Teslimat Raporu")
-        send_telegram_message(report_text)
-        st.sidebar.success(f"{selected_date.strftime('%d-%m-%Y')} tarihli rapor gönderildi!")
+send_report_button = st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder")
 
+# --- VERİ YÜKLEME VE ARKA PLAN İŞLEMLERİ ---
 templates = load_templates()
 past_df = load_past_data()
+stores_map = {store['name']: store for store in STORES}
 
 if not templates:
     st.sidebar.warning("`cevap_sablonlari.xlsx` dosyası bulunamadı veya boş.")
@@ -348,11 +334,18 @@ if past_df is not None:
 else:
     st.sidebar.warning("`soru_cevap_ornekleri.xlsx` dosyası bulunamadı.")
 
-stores_map = {store['name']: store for store in STORES}
-process_telegram_updates(stores_map, templates)
+# --- DÜZELTME: Raporlama butonu işlemini ana gövde çizilmeden önce yap ---
+if send_report_button:
+    with st.sidebar.spinner("Teslimat raporu oluşturuluyor..."):
+        report_text = generate_report_message(STORES, selected_date, "Shipped", "Delivered", title="Tarihli Teslimat Raporu")
+        send_telegram_message(report_text)
+        st.sidebar.success(f"{selected_date.strftime('%d-%m-%Y')} tarihli rapor gönderildi!")
 
+# Telegram ve otomatik raporları kontrol et
+process_telegram_updates(stores_map, templates)
 check_and_send_daily_shipped_report(STORES)
 
+# --- ANA SAYFA GÖVDESİ ---
 store_tabs = st.tabs([s['name'] for s in STORES])
 
 for i, store in enumerate(STORES):
@@ -390,19 +383,16 @@ for i, store in enumerate(STORES):
         with col2:
             st.subheader("Cevap Bekleyen Müşteri Soruları")
             
-            # --- DÜZELTME BAŞLANGICI: API'den gelen soruları güvenli bir şekilde filtrele ---
             all_questions_raw = get_waiting_questions(store)
             questions = []
             seen_question_ids = set()
             if all_questions_raw:
                 for q in all_questions_raw:
-                    # Soru verisinin geçerli bir sözlük olduğundan ve 'id' anahtarını içerdiğinden emin ol
                     if isinstance(q, dict) and q.get("id"):
                         q_id = q["id"]
                         if q_id not in seen_question_ids:
                             questions.append(q)
                             seen_question_ids.add(q_id)
-            # --- DÜZELTME SONU ---
             
             if questions and store.get('send_notifications'):
                 if 'notified_question_ids' not in st.session_state:
