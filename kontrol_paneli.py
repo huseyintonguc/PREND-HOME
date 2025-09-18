@@ -166,22 +166,17 @@ def process_telegram_updates(stores_map, templates):
 # --- GÜNLÜK KARGO RAPORU FONKSİYONLARI ---
 
 def get_orders_by_status_for_date(store, target_date, status="Shipped"):
-    """Belirli bir mağaza için bir tarihteki belirli statüdeki siparişleri çeker."""
     headers = get_headers(store['api_key'], store['api_secret'])
-    
     turkey_tz = pytz.timezone("Europe/Istanbul")
     start_of_day = turkey_tz.localize(datetime.combine(target_date, datetime.min.time()))
     end_of_day = turkey_tz.localize(datetime.combine(target_date, datetime.max.time()))
-    
     start_timestamp = int(start_of_day.timestamp() * 1000)
     end_timestamp = int(end_of_day.timestamp() * 1000)
-    
     all_packages = []
     page = 0
     size = 200
     
     while True:
-        # Önceki TypeError hatasını önlemek için URL oluşturma düzeltildi
         base_url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/orders"
         params = f"startDate={start_timestamp}&endDate={end_timestamp}&status={status}&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
         url = f"{base_url}?{params}"
@@ -204,7 +199,6 @@ def get_orders_by_status_for_date(store, target_date, status="Shipped"):
     return all_packages
 
 def generate_report_message(stores, target_date, status="Shipped", title="Kargo Raporu"):
-    """Belirli bir tarih ve statü için rapor metni oluşturur."""
     report_date_str = target_date.strftime("%Y-%m-%d")
     report_message = f"📊 *{title} ({report_date_str})*\n\n"
     any_data_found = False
@@ -234,7 +228,6 @@ def generate_report_message(stores, target_date, status="Shipped", title="Kargo 
     return report_message
 
 def check_and_send_daily_shipped_report(stores):
-    """Saat 18:00'i geçtiyse ve gönderilmediyse günlük kargoya verilenler raporunu gönderir."""
     turkey_tz = pytz.timezone("Europe/Istanbul")
     now = datetime.now(turkey_tz)
     
@@ -340,7 +333,6 @@ else:
 stores_map = {store['name']: store for store in STORES}
 process_telegram_updates(stores_map, templates)
 
-# Otomatik günlük kargo raporunu kontrol et ve gönder
 check_and_send_daily_shipped_report(STORES)
 
 store_tabs = st.tabs([s['name'] for s in STORES])
@@ -379,7 +371,19 @@ for i, store in enumerate(STORES):
                                     st.warning("Onaylanacak ürün kalemi bulunamadı.")
         with col2:
             st.subheader("Cevap Bekleyen Müşteri Soruları")
-            questions = get_waiting_questions(store)
+            
+            # --- HATA DÜZELTMESİ BURADA UYGULANDI ---
+            # API'den gelen sorularda tekrar eden ID'ler olmasını engelle
+            all_questions = get_waiting_questions(store)
+            questions = []
+            seen_question_ids = set()
+            if all_questions:
+                for q in all_questions:
+                    q_id = q.get("id")
+                    if q_id and q_id not in seen_question_ids:
+                        questions.append(q)
+                        seen_question_ids.add(q_id)
+            
             if questions and store.get('send_notifications'):
                 if 'notified_question_ids' not in st.session_state:
                     st.session_state.notified_question_ids = set()
@@ -397,6 +401,7 @@ for i, store in enumerate(STORES):
                         )
                         send_telegram_message(message)
                         st.session_state.notified_question_ids.add(q_id)
+            
             if not questions: 
                 st.info("Cevap bekleyen soru bulunamadı.")
             else:
@@ -447,3 +452,4 @@ for i, store in enumerate(STORES):
                                         st.rerun()
                                     else: 
                                         st.error(f"Cevap gönderilemedi: {message}")
+
