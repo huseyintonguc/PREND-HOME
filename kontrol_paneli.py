@@ -166,12 +166,15 @@ def process_telegram_updates(stores_map, templates):
 # --- GÜNLÜK KARGO RAPORU FONKSİYONLARI ---
 
 def get_orders_by_status_for_date(store, target_date, status="Shipped"):
+    """Daha geniş bir aralıkta arama yapıp sonra yerel olarak filtreleyerek API tutarsızlıklarını çözer."""
     headers = get_headers(store['api_key'], store['api_secret'])
     turkey_tz = pytz.timezone("Europe/Istanbul")
-    start_of_day = turkey_tz.localize(datetime.combine(target_date, datetime.min.time()))
-    end_of_day = turkey_tz.localize(datetime.combine(target_date, datetime.max.time()))
-    start_timestamp = int(start_of_day.timestamp() * 1000)
-    end_timestamp = int(end_of_day.timestamp() * 1000)
+
+    # API'den daha geniş bir zaman aralığı iste (örn: 7 gün)
+    api_start_date = target_date - timedelta(days=7)
+    start_timestamp = int(turkey_tz.localize(datetime.combine(api_start_date, datetime.min.time())).timestamp() * 1000)
+    end_timestamp = int(turkey_tz.localize(datetime.combine(target_date, datetime.max.time())).timestamp() * 1000)
+    
     all_packages = []
     page = 0
     size = 200
@@ -195,8 +198,22 @@ def get_orders_by_status_for_date(store, target_date, status="Shipped"):
         except requests.exceptions.RequestException as e:
             st.sidebar.error(f"{store['name']} için {status} raporu alınamadı: {e}")
             return None
+    
+    # API'den gelen sonuçları yerel olarak tam istenen güne göre filtrele
+    if not all_packages:
+        return []
+
+    start_of_target_day_ts = int(turkey_tz.localize(datetime.combine(target_date, datetime.min.time())).timestamp() * 1000)
+    end_of_target_day_ts = int(turkey_tz.localize(datetime.combine(target_date, datetime.max.time())).timestamp() * 1000)
+
+    filtered_packages = []
+    for pkg in all_packages:
+        # API, durum değişikliğinin olduğu `packageLastModifiedDate`'e göre filtreleme yapar
+        modified_date_ts = pkg.get("packageLastModifiedDate")
+        if modified_date_ts and start_of_target_day_ts <= modified_date_ts <= end_of_target_day_ts:
+            filtered_packages.append(pkg)
             
-    return all_packages
+    return filtered_packages
 
 def generate_report_message(stores, target_date, status="Shipped", title="Kargo Raporu"):
     report_date_str = target_date.strftime("%Y-%m-%d")
@@ -372,8 +389,6 @@ for i, store in enumerate(STORES):
         with col2:
             st.subheader("Cevap Bekleyen Müşteri Soruları")
             
-            # --- HATA DÜZELTMESİ BURADA UYGULANDI ---
-            # API'den gelen sorularda tekrar eden ID'ler olmasını engelle
             all_questions = get_waiting_questions(store)
             questions = []
             seen_question_ids = set()
