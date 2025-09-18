@@ -18,9 +18,6 @@ st.title("Trendyol Multi-Store Otomasyon Paneli")
 try:
     openai.api_key = st.secrets["OPENAI_API_KEY"]
     TELEGRAM_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN")
-    # Secrets dosyanızda tek bir yetkili kullanıcı için TELEGRAM_CHAT_ID = "ID"
-    # veya birden fazla yetkili için AUTHORIZED_CHAT_IDS = ["ID1", "ID2"] olmalıdır.
-    # Bu kod her ikisiyle de uyumlu çalışır.
     if "AUTHORIZED_CHAT_IDS" in st.secrets:
         AUTHORIZED_CHAT_IDS = st.secrets.get("AUTHORIZED_CHAT_IDS", [])
     else:
@@ -166,17 +163,18 @@ def process_telegram_updates(stores_map, templates):
     except Exception as e:
         st.sidebar.error(f"Telegram güncellemeleri alınırken hata: {e}")
 
-# YENİ EKLENEN FONKSİYONLAR
-@st.cache_data(ttl=3600)
-def get_daily_shipped_orders(store):
-    """Belirli bir mağaza için o gün 'Shipped' durumuna geçen siparişleri çeker."""
+# --- GÜNLÜK KARGO RAPORU FONKSİYONLARI ---
+
+def get_orders_by_status_for_date(store, target_date, status="Shipped"):
+    """Belirli bir mağaza için bir tarihteki belirli statüdeki siparişleri çeker."""
     headers = get_headers(store['api_key'], store['api_secret'])
     
     turkey_tz = pytz.timezone("Europe/Istanbul")
-    now = datetime.now(turkey_tz)
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_of_day = turkey_tz.localize(datetime.combine(target_date, datetime.min.time()))
+    end_of_day = turkey_tz.localize(datetime.combine(target_date, datetime.max.time()))
     
     start_timestamp = int(start_of_day.timestamp() * 1000)
+    end_timestamp = int(end_of_day.timestamp() * 1000)
     
     all_packages = []
     page = 0
@@ -185,7 +183,8 @@ def get_daily_shipped_orders(store):
     while True:
         url = (
             f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/orders"
-            f"?startDate={start_timestamp}&status=Shipped&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
+            f"?startDate={start_timestamp}&endDate={end_timestamp}&status={status}&page={page}&size={size}"
+            f"&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
         )
         try:
             response = requests.get(url, headers=headers, timeout=20)
@@ -199,13 +198,43 @@ def get_daily_shipped_orders(store):
             page += 1
             time.sleep(0.5)
         except requests.exceptions.RequestException as e:
-            st.sidebar.error(f"{store['name']} için kargo raporu alınamadı: {e}")
+            st.sidebar.error(f"{store['name']} için {status} raporu alınamadı: {e}")
             return None
             
     return all_packages
 
-def check_and_send_daily_report(stores):
-    """Saat 18:00'i geçtiyse ve rapor gönderilmediyse günlük kargo raporunu gönderir."""
+def generate_report_message(stores, target_date, status="Shipped", title="Kargo Raporu"):
+    """Belirli bir tarih ve statü için rapor metni oluşturur."""
+    report_date_str = target_date.strftime("%Y-%m-%d")
+    report_message = f"📊 *{title} ({report_date_str})*\n\n"
+    any_data_found = False
+
+    for store in stores:
+        packages = get_orders_by_status_for_date(store, target_date, status)
+        
+        if packages is None:
+            report_message += f"*{store['name']}*: Veri alınamadı. ❌\n"
+            continue
+
+        if not packages:
+            report_message += f"*{store['name']}*: Bu statüde sipariş yok.\n"
+            continue
+            
+        cargo_counts = Counter(pkg.get('cargoProviderName', 'Diğer') for pkg in packages)
+        any_data_found = True
+        total_packages = len(packages)
+        report_message += f"*{store['name']}* (Toplam: {total_packages} adet):\n"
+        for cargo_name, count in cargo_counts.items():
+            report_message += f" - {cargo_name}: *{count} adet*\n"
+        report_message += "\n"
+
+    if not any_data_found:
+        return f"📊 *{title} ({report_date_str})*\n\nTüm mağazalarda bu statüde sipariş bulunamadı."
+
+    return report_message
+
+def check_and_send_daily_shipped_report(stores):
+    """Saat 18:00'i geçtiyse ve gönderilmediyse günlük kargoya verilenler raporunu gönderir."""
     turkey_tz = pytz.timezone("Europe/Istanbul")
     now = datetime.now(turkey_tz)
     
@@ -213,45 +242,14 @@ def check_and_send_daily_report(stores):
         return
 
     today_str = now.strftime("%Y-%m-%d")
-    report_sent_key = f"report_sent_{today_str}"
+    report_sent_key = f"report_sent_shipped_{today_str}"
 
     if st.session_state.get(report_sent_key, False):
         return
-
-    final_report_message = f"📊 *Günlük Kargo Raporu ({today_str})*\n\n"
-    any_data_found = False
-
-    for store in stores:
-        packages = get_daily_shipped_orders(store)
-        
-        if packages is None:
-            final_report_message += f"*{store['name']}*: Veri alınamadı. ❌\n"
-            continue
-
-        if not packages:
-            final_report_message += f"*{store['name']}*: Bugün kargolanan sipariş yok.\n"
-            continue
-            
-        cargo_counts = Counter(pkg.get('cargoProviderName') for pkg in packages)
-        
-        if not cargo_counts:
-            final_report_message += f"*{store['name']}*: Bugün kargolanan sipariş yok.\n"
-            continue
-
-        any_data_found = True
-        total_packages = len(packages)
-        final_report_message += f"*{store['name']}* (Toplam: {total_packages} kargo):\n"
-        for cargo_name, count in cargo_counts.items():
-            final_report_message += f" - {cargo_name}: *{count} adet*\n"
-        final_report_message += "\n"
-
-    if any_data_found:
-        send_telegram_message(final_report_message)
-    else:
-        send_telegram_message(f"📊 *Günlük Kargo Raporu ({today_str})*\n\nTüm mağazalarda bugün kargolanan sipariş bulunamadı.")
-
+    
+    report_message = generate_report_message(stores, now.date(), status="Shipped", title="Günlük Kargoya Verilenler Raporu")
+    send_telegram_message(report_message)
     st.session_state[report_sent_key] = True
-# YENİ EKLENEN FONKSİYONLARIN SONU
 
 def get_pending_claims(store):
     url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/claims?claimItemStatus=WaitingInAction&size=50&page=0"
@@ -305,9 +303,7 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
     if len(examples) < min_examples:
         return None, f"Örnek sayısı yetersiz ({len(examples)}/{min_examples})."
     
-    prompt = (
-        "Sen bir pazaryeri müşteri temsilcisisin..."
-    )
+    prompt = ("Sen bir pazaryeri müşteri temsilcisisin...")
 
     try:
         client = openai.OpenAI(api_key=openai.api_key)
@@ -322,6 +318,15 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
 st.sidebar.header("Genel Ayarlar")
 MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayısı", min_value=1, value=1)
 
+# YENİ EKLENEN MANUEL RAPOR BÖLÜMÜ
+st.sidebar.header("Manuel Raporlama")
+selected_date = st.sidebar.date_input("Rapor için bir tarih seçin", datetime.now())
+if st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder"):
+    with st.sidebar.spinner("Teslimat raporu oluşturuluyor..."):
+        report_text = generate_report_message(STORES, selected_date, status="Delivered", title="Tarihli Teslimat Raporu")
+        send_telegram_message(report_text)
+        st.sidebar.success(f"{selected_date.strftime('%d-%m-%Y')} tarihli rapor gönderildi!")
+
 templates = load_templates()
 past_df = load_past_data()
 
@@ -335,8 +340,8 @@ else:
 stores_map = {store['name']: store for store in STORES}
 process_telegram_updates(stores_map, templates)
 
-# YENİ EKLENEN SATIR
-check_and_send_daily_report(STORES)
+# Otomatik günlük kargo raporunu kontrol et ve gönder
+check_and_send_daily_shipped_report(STORES)
 
 store_tabs = st.tabs([s['name'] for s in STORES])
 
