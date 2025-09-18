@@ -148,7 +148,8 @@ def process_telegram_updates(stores_map, templates):
 
 # --- RAPORLAMA FONKSİYONLARI (YENİ VE GÜVENİLİR YÖNTEM) ---
 
-def get_filtered_orders(store, target_date, final_status):
+def fetch_all_orders_for_period(store, target_date):
+    """API'den status filtresi olmadan geniş bir aralıktaki tüm siparişleri çeker."""
     headers = get_headers(store['api_key'], store['api_secret'])
     turkey_tz = pytz.timezone("Europe/Istanbul")
 
@@ -180,40 +181,42 @@ def get_filtered_orders(store, target_date, final_status):
             st.sidebar.error(f"{store['name']} için rapor alınamadı: {e}")
             return None
     
-    if not all_packages:
-        return []
-
-    start_of_target_day_ts = int(turkey_tz.localize(datetime.combine(target_date, datetime.min.time())).timestamp() * 1000)
-    end_of_target_day_ts = int(turkey_tz.localize(datetime.combine(target_date, datetime.max.time())).timestamp() * 1000)
-
-    filtered_packages = []
-    for pkg in all_packages:
-        if isinstance(pkg, dict) and pkg.get("status") == final_status:
-            modified_date_ts = pkg.get("packageLastModifiedDate")
-            if modified_date_ts and start_of_target_day_ts <= modified_date_ts <= end_of_target_day_ts:
-                filtered_packages.append(pkg)
-            
-    return filtered_packages
+    return all_packages
 
 def generate_report_message(stores, target_date, final_status, title="Rapor"):
     report_date_str = target_date.strftime("%Y-%m-%d")
     report_message = f"📊 *{title} ({report_date_str})*\n\n"
     any_data_found = False
 
+    turkey_tz = pytz.timezone("Europe/Istanbul")
+    start_of_target_day_ts = int(turkey_tz.localize(datetime.combine(target_date, datetime.min.time())).timestamp() * 1000)
+    end_of_target_day_ts = int(turkey_tz.localize(datetime.combine(target_date, datetime.max.time())).timestamp() * 1000)
+
     for store in stores:
-        packages = get_filtered_orders(store, target_date, final_status)
+        all_packages_in_period = fetch_all_orders_for_period(store, target_date)
         
-        if packages is None:
+        if all_packages_in_period is None:
             report_message += f"*{store['name']}*: Veri alınamadı. ❌\n"
             continue
 
-        if not packages:
+        filtered_packages = []
+        for pkg in all_packages_in_period:
+            if isinstance(pkg, dict) and pkg.get("status") == final_status:
+                modified_date_ts = pkg.get("packageLastModifiedDate")
+                if modified_date_ts and start_of_target_day_ts <= modified_date_ts <= end_of_target_day_ts:
+                    filtered_packages.append(pkg)
+
+        if not filtered_packages:
             report_message += f"*{store['name']}*: Bu kriterde sipariş bulunamadı.\n"
+            if all_packages_in_period:
+                status_counts = Counter(pkg.get('status', 'Durum Yok') for pkg in all_packages_in_period if isinstance(pkg, dict))
+                debug_info = f"  _(Not: API'den {len(all_packages_in_period)} paket verisi alındı. Görülen durumlar: {', '.join([f'{k} ({v})' for k, v in status_counts.items()])})_\n"
+                report_message += debug_info
             continue
             
-        cargo_counts = Counter(pkg.get('cargoProviderName', 'Diğer') for pkg in packages)
+        cargo_counts = Counter(pkg.get('cargoProviderName', 'Diğer') for pkg in filtered_packages)
         any_data_found = True
-        total_packages = len(packages)
+        total_packages = len(filtered_packages)
         report_message += f"*{store['name']}* (Toplam: {total_packages} adet):\n"
         for cargo_name, count in cargo_counts.items():
             report_message += f" - {cargo_name}: *{count} adet*\n"
@@ -316,9 +319,9 @@ if st.session_state['run_report']:
         send_telegram_message(report_text)
         
         if "bulunamadı" in report_text:
-            st.info("Rapor gönderildi, ancak belirtilen kriterlerde sipariş bulunamadı.")
+            st.session_state.report_result = "Rapor gönderildi, ancak belirtilen kriterlerde sipariş bulunamadı."
         else:
-            st.success(f"{report_date.strftime('%d-%m-%Y')} tarihli rapor başarıyla gönderildi!")
+            st.session_state.report_result = f"{report_date.strftime('%d-%m-%Y')} tarihli rapor başarıyla gönderildi!"
     
     st.session_state['run_report'] = False
 
@@ -347,6 +350,12 @@ else:
 
 process_telegram_updates(stores_map, templates)
 check_and_send_daily_shipped_report(STORES)
+
+# Rapor sonucunu ana gövdede göster
+if 'report_result' in st.session_state:
+    st.info(st.session_state.report_result)
+    del st.session_state.report_result # Mesajı bir kere gösterdikten sonra temizle
+
 
 # --- ANA SAYFA GÖVDESİ ---
 store_tabs = st.tabs([s['name'] for s in STORES])
