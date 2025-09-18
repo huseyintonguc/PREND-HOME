@@ -181,11 +181,11 @@ def get_orders_by_status_for_date(store, target_date, status="Shipped"):
     size = 200
     
     while True:
-        url = (
-            f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/orders"
-            f"?startDate={start_timestamp}&endDate={end_timestamp}&status={status}&page={page}&size={size}"
-            f"&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
-        )
+        # Önceki TypeError hatasını önlemek için URL oluşturma düzeltildi
+        base_url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/orders"
+        params = f"startDate={start_timestamp}&endDate={end_timestamp}&status={status}&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
+        url = f"{base_url}?{params}"
+        
         try:
             response = requests.get(url, headers=headers, timeout=20)
             response.raise_for_status()
@@ -318,7 +318,7 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
 st.sidebar.header("Genel Ayarlar")
 MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayısı", min_value=1, value=1)
 
-# YENİ EKLENEN MANUEL RAPOR BÖLÜMÜ
+# MANUEL RAPOR BÖLÜMÜ
 st.sidebar.header("Manuel Raporlama")
 selected_date = st.sidebar.date_input("Rapor için bir tarih seçin", datetime.now())
 if st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder"):
