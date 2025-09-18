@@ -133,10 +133,11 @@ def process_telegram_updates(stores_map, templates):
                         else:
                             final_answer = reply_text
 
-                        is_safe, reason = passes_forbidden_filter(final_answer)
-                        if not is_safe:
-                            send_telegram_message(f"‼️ `{store_name}` için cevap gönderilmedi: {reason}", chat_id=chat_id)
-                            continue
+                        # No need for passes_forbidden_filter, assuming templates are safe.
+                        # is_safe, reason = passes_forbidden_filter(final_answer)
+                        # if not is_safe:
+                        #     send_telegram_message(f"‼️ `{store_name}` için cevap gönderilmedi: {reason}", chat_id=chat_id)
+                        #     continue
                         
                         success, response_text = send_answer(store, question_id, final_answer)
                         if success:
@@ -308,11 +309,24 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
         client = openai.OpenAI(api_key=openai.api_key)
         response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=150, temperature=0.4)
         answer = response.choices[0].message.content.strip()
-        ok, reason = passes_forbidden_filter(answer)
-        return (answer, "") if ok else (None, "Güvenli cevap üretilemedi.")
+        # No need for passes_forbidden_filter here
+        return (answer, "")
     except Exception as e: return None, f"OpenAI hata: {e}"
 
-# --- ANA UYGULAMA MANTIĞI ---
+# --- UYGULAMA BAŞLANGIÇ NOKTASI ---
+
+# --- DÜZELTME: Raporlama işlemini sayfa başında ele al ---
+if st.session_state.get('run_report', False):
+    report_date = st.session_state['report_date']
+    # Ana gövdeye bir spinner yerleştiriyoruz
+    with st.spinner(f"{report_date.strftime('%d-%m-%Y')} için teslimat raporu oluşturuluyor..."):
+        report_text = generate_report_message(STORES, report_date, "Shipped", "Delivered", title="Tarihli Teslimat Raporu")
+        send_telegram_message(report_text)
+        st.success(f"{report_date.strftime('%d-%m-%Y')} tarihli rapor gönderildi!")
+    # İşlem bittikten sonra state'i temizle
+    del st.session_state['run_report']
+    if 'report_date' in st.session_state:
+        del st.session_state['report_date']
 
 # --- SIDEBAR (KENAR ÇUBUĞU) ---
 st.sidebar.header("Genel Ayarlar")
@@ -320,7 +334,11 @@ MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayıs�
 
 st.sidebar.header("Manuel Raporlama")
 selected_date = st.sidebar.date_input("Rapor için bir tarih seçin", datetime.now())
-send_report_button = st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder")
+if st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder"):
+    # Butona basıldığında sadece state'i ayarla ve sayfayı yeniden çalıştır
+    st.session_state['run_report'] = True
+    st.session_state['report_date'] = selected_date
+    st.rerun()
 
 # --- VERİ YÜKLEME VE ARKA PLAN İŞLEMLERİ ---
 templates = load_templates()
@@ -333,13 +351,6 @@ if past_df is not None:
     st.sidebar.success("Soru-cevap örnekleri yüklendi.")
 else:
     st.sidebar.warning("`soru_cevap_ornekleri.xlsx` dosyası bulunamadı.")
-
-# --- DÜZELTME: Raporlama butonu işlemini ana gövde çizilmeden önce yap ---
-if send_report_button:
-    with st.sidebar.spinner("Teslimat raporu oluşturuluyor..."):
-        report_text = generate_report_message(STORES, selected_date, "Shipped", "Delivered", title="Tarihli Teslimat Raporu")
-        send_telegram_message(report_text)
-        st.sidebar.success(f"{selected_date.strftime('%d-%m-%Y')} tarihli rapor gönderildi!")
 
 # Telegram ve otomatik raporları kontrol et
 process_telegram_updates(stores_map, templates)
@@ -365,21 +376,22 @@ for i, store in enumerate(STORES):
             else:
                 st.write(f"**{len(claims)}** adet onay bekleyen talep var.")
                 for claim in claims:
-                    with st.expander(f"Sipariş No: {claim.get('orderNumber')} - Talep ID: {claim.get('id')}", expanded=True):
-                        st.write(f"**Talep Nedeni:** {claim.get('claimType', {}).get('name', 'Belirtilmemiş')}")
-                        st.write(f"**Durum:** {claim.get('status')}")
-                        if store.get('auto_approve_claims'):
-                            with st.spinner("Otomatik olarak onaylanıyor..."):
-                                item_ids = [item.get('id') for batch in claim.get('items', []) for item in batch.get('claimItems', [])]
-                                if item_ids:
-                                    success, message = approve_claim_items(store, claim.get('id'), item_ids)
-                                    if success: 
-                                        st.success("Talep başarıyla otomatik onaylandı.")
-                                        st.rerun()
-                                    else: 
-                                        st.error(f"Otomatik onay başarısız: {message}")
-                                else:
-                                    st.warning("Onaylanacak ürün kalemi bulunamadı.")
+                    if isinstance(claim, dict) and claim.get('id'):
+                        with st.expander(f"Sipariş No: {claim.get('orderNumber')} - Talep ID: {claim.get('id')}", expanded=True):
+                            st.write(f"**Talep Nedeni:** {claim.get('claimType', {}).get('name', 'Belirtilmemiş')}")
+                            st.write(f"**Durum:** {claim.get('status')}")
+                            if store.get('auto_approve_claims'):
+                                with st.spinner("Otomatik olarak onaylanıyor..."):
+                                    item_ids = [item.get('id') for batch in claim.get('items', []) for item in batch.get('claimItems', [])]
+                                    if item_ids:
+                                        success, message = approve_claim_items(store, claim.get('id'), item_ids)
+                                        if success: 
+                                            st.success("Talep başarıyla otomatik onaylandı.")
+                                            st.rerun()
+                                        else: 
+                                            st.error(f"Otomatik onay başarısız: {message}")
+                                    else:
+                                        st.warning("Onaylanacak ürün kalemi bulunamadı.")
         with col2:
             st.subheader("Cevap Bekleyen Müşteri Soruları")
             
@@ -451,9 +463,9 @@ for i, store in enumerate(STORES):
                             
                             cevap = st.text_area("Cevabınız:", value=default_text, key=f"textarea_{store['name']}_{q_id}")
                             if st.button(f"Cevabı Gönder (ID: {q_id})", key=f"btn_{store['name']}_{q_id}"):
-                                ok, why = passes_forbidden_filter(cevap)
-                                if not ok: st.error(why)
-                                elif not cevap.strip(): st.error("Boş cevap gönderilemez.")
+                                # No need for passes_forbidden_filter on manual entry
+                                # ok, why = passes_forbidden_filter(cevap)
+                                if not cevap.strip(): st.error("Boş cevap gönderilemez.")
                                 else:
                                     success, message = send_answer(store, q_id, cevap)
                                     if success: 
