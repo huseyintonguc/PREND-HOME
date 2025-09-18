@@ -146,9 +146,9 @@ def process_telegram_updates(stores_map, templates):
     except Exception as e:
         st.sidebar.error(f"Telegram güncellemeleri alınırken hata: {e}")
 
-# --- RAPORLAMA FONKSİYONLARI ---
+# --- RAPORLAMA FONKSİYONLARI (YENİ VE GÜVENİLİR YÖNTEM) ---
 
-def get_and_filter_orders_for_report(store, target_date, api_query_status, final_filter_status):
+def get_filtered_orders(store, target_date, final_status):
     headers = get_headers(store['api_key'], store['api_secret'])
     turkey_tz = pytz.timezone("Europe/Istanbul")
 
@@ -162,11 +162,7 @@ def get_and_filter_orders_for_report(store, target_date, api_query_status, final
     
     while True:
         base_url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/orders"
-        # --- DÜZELTME: API sorgusunda status parametresini opsiyonel hale getir ---
         params = f"startDate={start_timestamp}&endDate={end_timestamp}&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
-        if api_query_status:
-            params += f"&status={api_query_status}"
-        
         url = f"{base_url}?{params}"
         
         try:
@@ -192,20 +188,20 @@ def get_and_filter_orders_for_report(store, target_date, api_query_status, final
 
     filtered_packages = []
     for pkg in all_packages:
-        if isinstance(pkg, dict) and pkg.get("status") == final_filter_status:
+        if isinstance(pkg, dict) and pkg.get("status") == final_status:
             modified_date_ts = pkg.get("packageLastModifiedDate")
             if modified_date_ts and start_of_target_day_ts <= modified_date_ts <= end_of_target_day_ts:
                 filtered_packages.append(pkg)
             
     return filtered_packages
 
-def generate_report_message(stores, target_date, api_query_status, final_filter_status, title="Rapor"):
+def generate_report_message(stores, target_date, final_status, title="Rapor"):
     report_date_str = target_date.strftime("%Y-%m-%d")
     report_message = f"📊 *{title} ({report_date_str})*\n\n"
     any_data_found = False
 
     for store in stores:
-        packages = get_and_filter_orders_for_report(store, target_date, api_query_status, final_filter_status)
+        packages = get_filtered_orders(store, target_date, final_status)
         
         if packages is None:
             report_message += f"*{store['name']}*: Veri alınamadı. ❌\n"
@@ -241,7 +237,7 @@ def check_and_send_daily_shipped_report(stores):
     if st.session_state.get(report_sent_key, False):
         return
     
-    report_message = generate_report_message(stores, now.date(), "Shipped", "Shipped", title="Günlük Kargoya Verilenler Raporu")
+    report_message = generate_report_message(stores, now.date(), "Shipped", title="Günlük Kargoya Verilenler Raporu")
     send_telegram_message(report_message)
     st.session_state[report_sent_key] = True
 
@@ -304,7 +300,6 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
         client = openai.OpenAI(api_key=openai.api_key)
         response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=150, temperature=0.4)
         answer = response.choices[0].message.content.strip()
-        # No need for passes_forbidden_filter here
         return (answer, "")
     except Exception as e: return None, f"OpenAI hata: {e}"
 
@@ -315,13 +310,18 @@ if 'run_report' not in st.session_state:
 
 if st.session_state['run_report']:
     report_date = st.session_state['report_date']
-    with st.spinner(f"{report_date.strftime('%d-%m-%Y')} için teslimat raporu oluşturuluyor..."):
-        # --- DÜZELTME: API sorgusunu status=None ile yap ---
-        report_text = generate_report_message(STORES, report_date, None, "Delivered", title="Tarihli Teslimat Raporu")
-        send_telegram_message(report_text)
-        st.success(f"{report_date.strftime('%d-%m-%Y')} tarihli rapor gönderildi!")
-    st.session_state['run_report'] = False
     
+    with st.spinner(f"{report_date.strftime('%d-%m-%Y')} için teslimat raporu oluşturuluyor..."):
+        report_text = generate_report_message(STORES, report_date, "Delivered", title="Tarihli Teslimat Raporu")
+        send_telegram_message(report_text)
+        
+        if "bulunamadı" in report_text:
+            st.info("Rapor gönderildi, ancak belirtilen kriterlerde sipariş bulunamadı.")
+        else:
+            st.success(f"{report_date.strftime('%d-%m-%Y')} tarihli rapor başarıyla gönderildi!")
+    
+    st.session_state['run_report'] = False
+
 # --- SIDEBAR (KENAR ÇUBUĞU) ---
 st.sidebar.header("Genel Ayarlar")
 MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayısı", min_value=1, value=1)
