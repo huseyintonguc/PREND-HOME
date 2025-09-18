@@ -163,15 +163,15 @@ def process_telegram_updates(stores_map, templates):
     except Exception as e:
         st.sidebar.error(f"Telegram güncellemeleri alınırken hata: {e}")
 
-# --- GÜNLÜK KARGO RAPORU FONKSİYONLARI ---
+# --- GÜNLÜK KARGO RAPORU FONKSİYONLARI (DÜZELTİLMİŞ) ---
 
-def get_orders_by_status_for_date(store, target_date, status="Shipped"):
-    """Daha geniş bir aralıkta arama yapıp sonra yerel olarak filtreleyerek API tutarsızlıklarını çözer."""
+def get_and_filter_orders_for_report(store, target_date, api_query_status, final_filter_status):
+    """Geniş bir aralıkta sorgulama yapıp, sonuçları yerel olarak filtreler."""
     headers = get_headers(store['api_key'], store['api_secret'])
     turkey_tz = pytz.timezone("Europe/Istanbul")
 
-    # API'den daha geniş bir zaman aralığı iste (örn: 7 gün)
-    api_start_date = target_date - timedelta(days=7)
+    # API'den daha geniş bir zaman aralığı iste (örn: 14 gün)
+    api_start_date = target_date - timedelta(days=14)
     start_timestamp = int(turkey_tz.localize(datetime.combine(api_start_date, datetime.min.time())).timestamp() * 1000)
     end_timestamp = int(turkey_tz.localize(datetime.combine(target_date, datetime.max.time())).timestamp() * 1000)
     
@@ -181,11 +181,14 @@ def get_orders_by_status_for_date(store, target_date, status="Shipped"):
     
     while True:
         base_url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/orders"
-        params = f"startDate={start_timestamp}&endDate={end_timestamp}&status={status}&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
+        params = f"startDate={start_timestamp}&endDate={end_timestamp}&status={api_query_status}&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
         url = f"{base_url}?{params}"
         
         try:
             response = requests.get(url, headers=headers, timeout=20)
+            if response.status_code == 404:
+                st.sidebar.error(f"{store['name']} için {api_query_status} sorgusu başarısız (404).")
+                return None
             response.raise_for_status()
             data = response.json()
             packages = data.get("content", [])
@@ -196,10 +199,9 @@ def get_orders_by_status_for_date(store, target_date, status="Shipped"):
             page += 1
             time.sleep(0.5)
         except requests.exceptions.RequestException as e:
-            st.sidebar.error(f"{store['name']} için {status} raporu alınamadı: {e}")
+            st.sidebar.error(f"{store['name']} için {api_query_status} raporu alınamadı: {e}")
             return None
     
-    # API'den gelen sonuçları yerel olarak tam istenen güne göre filtrele
     if not all_packages:
         return []
 
@@ -208,27 +210,27 @@ def get_orders_by_status_for_date(store, target_date, status="Shipped"):
 
     filtered_packages = []
     for pkg in all_packages:
-        # API, durum değişikliğinin olduğu `packageLastModifiedDate`'e göre filtreleme yapar
-        modified_date_ts = pkg.get("packageLastModifiedDate")
-        if modified_date_ts and start_of_target_day_ts <= modified_date_ts <= end_of_target_day_ts:
-            filtered_packages.append(pkg)
+        if pkg.get("status") == final_filter_status:
+            modified_date_ts = pkg.get("packageLastModifiedDate")
+            if modified_date_ts and start_of_target_day_ts <= modified_date_ts <= end_of_target_day_ts:
+                filtered_packages.append(pkg)
             
     return filtered_packages
 
-def generate_report_message(stores, target_date, status="Shipped", title="Kargo Raporu"):
+def generate_report_message(stores, target_date, api_query_status, final_filter_status, title="Rapor"):
     report_date_str = target_date.strftime("%Y-%m-%d")
     report_message = f"📊 *{title} ({report_date_str})*\n\n"
     any_data_found = False
 
     for store in stores:
-        packages = get_orders_by_status_for_date(store, target_date, status)
+        packages = get_and_filter_orders_for_report(store, target_date, api_query_status, final_filter_status)
         
         if packages is None:
             report_message += f"*{store['name']}*: Veri alınamadı. ❌\n"
             continue
 
         if not packages:
-            report_message += f"*{store['name']}*: Bu statüde sipariş yok.\n"
+            report_message += f"*{store['name']}*: Bu kriterde sipariş bulunamadı.\n"
             continue
             
         cargo_counts = Counter(pkg.get('cargoProviderName', 'Diğer') for pkg in packages)
@@ -240,7 +242,7 @@ def generate_report_message(stores, target_date, status="Shipped", title="Kargo 
         report_message += "\n"
 
     if not any_data_found:
-        return f"📊 *{title} ({report_date_str})*\n\nTüm mağazalarda bu statüde sipariş bulunamadı."
+        return f"📊 *{title} ({report_date_str})*\n\nTüm mağazalarda bu kriterde sipariş bulunamadı."
 
     return report_message
 
@@ -257,7 +259,7 @@ def check_and_send_daily_shipped_report(stores):
     if st.session_state.get(report_sent_key, False):
         return
     
-    report_message = generate_report_message(stores, now.date(), status="Shipped", title="Günlük Kargoya Verilenler Raporu")
+    report_message = generate_report_message(stores, now.date(), "Shipped", "Shipped", title="Günlük Kargoya Verilenler Raporu")
     send_telegram_message(report_message)
     st.session_state[report_sent_key] = True
 
@@ -333,7 +335,8 @@ st.sidebar.header("Manuel Raporlama")
 selected_date = st.sidebar.date_input("Rapor için bir tarih seçin", datetime.now())
 if st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder"):
     with st.sidebar.spinner("Teslimat raporu oluşturuluyor..."):
-        report_text = generate_report_message(STORES, selected_date, status="Delivered", title="Tarihli Teslimat Raporu")
+        # Sorguyu 'Shipped' ile yap, sonucu 'Delivered' olanları kontrol et
+        report_text = generate_report_message(STORES, selected_date, "Shipped", "Delivered", title="Tarihli Teslimat Raporu")
         send_telegram_message(report_text)
         st.sidebar.success(f"{selected_date.strftime('%d-%m-%Y')} tarihli rapor gönderildi!")
 
