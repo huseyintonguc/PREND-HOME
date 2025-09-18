@@ -6,6 +6,9 @@ import openai
 import re
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
+import time
+import pytz
+from collections import Counter
 
 # --- Streamlit Arayüzü ve Ayarları ---
 st.set_page_config(layout="wide")
@@ -163,6 +166,93 @@ def process_telegram_updates(stores_map, templates):
     except Exception as e:
         st.sidebar.error(f"Telegram güncellemeleri alınırken hata: {e}")
 
+# YENİ EKLENEN FONKSİYONLAR
+@st.cache_data(ttl=3600)
+def get_daily_shipped_orders(store):
+    """Belirli bir mağaza için o gün 'Shipped' durumuna geçen siparişleri çeker."""
+    headers = get_headers(store['api_key'], store['api_secret'])
+    
+    turkey_tz = pytz.timezone("Europe/Istanbul")
+    now = datetime.now(turkey_tz)
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    start_timestamp = int(start_of_day.timestamp() * 1000)
+    
+    all_packages = []
+    page = 0
+    size = 200
+    
+    while True:
+        url = (
+            f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/orders"
+            f"?startDate={start_timestamp}&status=Shipped&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
+        )
+        try:
+            response = requests.get(url, headers=headers, timeout=20)
+            response.raise_for_status()
+            data = response.json()
+            packages = data.get("content", [])
+            all_packages.extend(packages)
+            
+            if not packages or len(packages) < size:
+                break
+            page += 1
+            time.sleep(0.5)
+        except requests.exceptions.RequestException as e:
+            st.sidebar.error(f"{store['name']} için kargo raporu alınamadı: {e}")
+            return None
+            
+    return all_packages
+
+def check_and_send_daily_report(stores):
+    """Saat 18:00'i geçtiyse ve rapor gönderilmediyse günlük kargo raporunu gönderir."""
+    turkey_tz = pytz.timezone("Europe/Istanbul")
+    now = datetime.now(turkey_tz)
+    
+    if now.hour < 18:
+        return
+
+    today_str = now.strftime("%Y-%m-%d")
+    report_sent_key = f"report_sent_{today_str}"
+
+    if st.session_state.get(report_sent_key, False):
+        return
+
+    final_report_message = f"📊 *Günlük Kargo Raporu ({today_str})*\n\n"
+    any_data_found = False
+
+    for store in stores:
+        packages = get_daily_shipped_orders(store)
+        
+        if packages is None:
+            final_report_message += f"*{store['name']}*: Veri alınamadı. ❌\n"
+            continue
+
+        if not packages:
+            final_report_message += f"*{store['name']}*: Bugün kargolanan sipariş yok.\n"
+            continue
+            
+        cargo_counts = Counter(pkg.get('cargoProviderName') for pkg in packages)
+        
+        if not cargo_counts:
+            final_report_message += f"*{store['name']}*: Bugün kargolanan sipariş yok.\n"
+            continue
+
+        any_data_found = True
+        total_packages = len(packages)
+        final_report_message += f"*{store['name']}* (Toplam: {total_packages} kargo):\n"
+        for cargo_name, count in cargo_counts.items():
+            final_report_message += f" - {cargo_name}: *{count} adet*\n"
+        final_report_message += "\n"
+
+    if any_data_found:
+        send_telegram_message(final_report_message)
+    else:
+        send_telegram_message(f"📊 *Günlük Kargo Raporu ({today_str})*\n\nTüm mağazalarda bugün kargolanan sipariş bulunamadı.")
+
+    st.session_state[report_sent_key] = True
+# YENİ EKLENEN FONKSİYONLARIN SONU
+
 def get_pending_claims(store):
     url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/claims?claimItemStatus=WaitingInAction&size=50&page=0"
     try:
@@ -244,6 +334,9 @@ else:
 
 stores_map = {store['name']: store for store in STORES}
 process_telegram_updates(stores_map, templates)
+
+# YENİ EKLENEN SATIR
+check_and_send_daily_report(STORES)
 
 store_tabs = st.tabs([s['name'] for s in STORES])
 
@@ -336,7 +429,6 @@ for i, store in enumerate(STORES):
                             default_text = suggestion if suggestion is not None else ""
                             if suggestion is None: st.info(f"Öneri üretilmedi: {reason}")
                             
-                            # --- DÜZELTME: Widget kimlikleri tamamen benzersiz hale getirildi ---
                             cevap = st.text_area("Cevabınız:", value=default_text, key=f"textarea_{store['name']}_{q_id}")
                             if st.button(f"Cevabı Gönder (ID: {q_id})", key=f"btn_{store['name']}_{q_id}"):
                                 ok, why = passes_forbidden_filter(cevap)
