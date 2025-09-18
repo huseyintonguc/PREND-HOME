@@ -166,11 +166,9 @@ def process_telegram_updates(stores_map, templates):
 # --- RAPORLAMA FONKSİYONLARI ---
 
 def get_and_filter_orders_for_report(store, target_date, api_query_status, final_filter_status):
-    """Geniş bir aralıkta sorgulama yapıp, sonuçları yerel olarak filtreler."""
     headers = get_headers(store['api_key'], store['api_secret'])
     turkey_tz = pytz.timezone("Europe/Istanbul")
 
-    # API'den daha geniş bir zaman aralığı iste (örn: 14 gün)
     api_start_date = target_date - timedelta(days=14)
     start_timestamp = int(turkey_tz.localize(datetime.combine(api_start_date, datetime.min.time())).timestamp() * 1000)
     end_timestamp = int(turkey_tz.localize(datetime.combine(target_date, datetime.max.time())).timestamp() * 1000)
@@ -210,7 +208,7 @@ def get_and_filter_orders_for_report(store, target_date, api_query_status, final
 
     filtered_packages = []
     for pkg in all_packages:
-        if pkg.get("status") == final_filter_status:
+        if pkg and pkg.get("status") == final_filter_status:
             modified_date_ts = pkg.get("packageLastModifiedDate")
             if modified_date_ts and start_of_target_day_ts <= modified_date_ts <= end_of_target_day_ts:
                 filtered_packages.append(pkg)
@@ -263,6 +261,7 @@ def check_and_send_daily_shipped_report(stores):
     send_telegram_message(report_message)
     st.session_state[report_sent_key] = True
 
+# --- DİĞER FONKSİYONLAR ---
 def get_pending_claims(store):
     url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/claims?claimItemStatus=WaitingInAction&size=50&page=0"
     try:
@@ -391,15 +390,19 @@ for i, store in enumerate(STORES):
         with col2:
             st.subheader("Cevap Bekleyen Müşteri Soruları")
             
-            all_questions = get_waiting_questions(store)
+            # --- DÜZELTME BAŞLANGICI: API'den gelen soruları güvenli bir şekilde filtrele ---
+            all_questions_raw = get_waiting_questions(store)
             questions = []
             seen_question_ids = set()
-            if all_questions:
-                for q in all_questions:
-                    q_id = q.get("id")
-                    if q_id and q_id not in seen_question_ids:
-                        questions.append(q)
-                        seen_question_ids.add(q_id)
+            if all_questions_raw:
+                for q in all_questions_raw:
+                    # Soru verisinin geçerli bir sözlük olduğundan ve 'id' anahtarını içerdiğinden emin ol
+                    if isinstance(q, dict) and q.get("id"):
+                        q_id = q["id"]
+                        if q_id not in seen_question_ids:
+                            questions.append(q)
+                            seen_question_ids.add(q_id)
+            # --- DÜZELTME SONU ---
             
             if questions and store.get('send_notifications'):
                 if 'notified_question_ids' not in st.session_state:
