@@ -132,12 +132,6 @@ def process_telegram_updates(stores_map, templates):
                                 continue
                         else:
                             final_answer = reply_text
-
-                        # No need for passes_forbidden_filter, assuming templates are safe.
-                        # is_safe, reason = passes_forbidden_filter(final_answer)
-                        # if not is_safe:
-                        #     send_telegram_message(f"‼️ `{store_name}` için cevap gönderilmedi: {reason}", chat_id=chat_id)
-                        #     continue
                         
                         success, response_text = send_answer(store, question_id, final_answer)
                         if success:
@@ -168,14 +162,15 @@ def get_and_filter_orders_for_report(store, target_date, api_query_status, final
     
     while True:
         base_url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/orders"
-        params = f"startDate={start_timestamp}&endDate={end_timestamp}&status={api_query_status}&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
+        # --- DÜZELTME: API sorgusunda status parametresini opsiyonel hale getir ---
+        params = f"startDate={start_timestamp}&endDate={end_timestamp}&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
+        if api_query_status:
+            params += f"&status={api_query_status}"
+        
         url = f"{base_url}?{params}"
         
         try:
             response = requests.get(url, headers=headers, timeout=20)
-            if response.status_code == 404:
-                st.sidebar.error(f"{store['name']} için {api_query_status} sorgusu başarısız (404).")
-                return None
             response.raise_for_status()
             data = response.json()
             packages = data.get("content", [])
@@ -186,7 +181,7 @@ def get_and_filter_orders_for_report(store, target_date, api_query_status, final
             page += 1
             time.sleep(0.5)
         except requests.exceptions.RequestException as e:
-            st.sidebar.error(f"{store['name']} için {api_query_status} raporu alınamadı: {e}")
+            st.sidebar.error(f"{store['name']} için rapor alınamadı: {e}")
             return None
     
     if not all_packages:
@@ -315,19 +310,18 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
 
 # --- UYGULAMA BAŞLANGIÇ NOKTASI ---
 
-# --- DÜZELTME: Raporlama işlemini sayfa başında ele al ---
-if st.session_state.get('run_report', False):
+if 'run_report' not in st.session_state:
+    st.session_state['run_report'] = False
+
+if st.session_state['run_report']:
     report_date = st.session_state['report_date']
-    # Ana gövdeye bir spinner yerleştiriyoruz
     with st.spinner(f"{report_date.strftime('%d-%m-%Y')} için teslimat raporu oluşturuluyor..."):
-        report_text = generate_report_message(STORES, report_date, "Shipped", "Delivered", title="Tarihli Teslimat Raporu")
+        # --- DÜZELTME: API sorgusunu status=None ile yap ---
+        report_text = generate_report_message(STORES, report_date, None, "Delivered", title="Tarihli Teslimat Raporu")
         send_telegram_message(report_text)
         st.success(f"{report_date.strftime('%d-%m-%Y')} tarihli rapor gönderildi!")
-    # İşlem bittikten sonra state'i temizle
-    del st.session_state['run_report']
-    if 'report_date' in st.session_state:
-        del st.session_state['report_date']
-
+    st.session_state['run_report'] = False
+    
 # --- SIDEBAR (KENAR ÇUBUĞU) ---
 st.sidebar.header("Genel Ayarlar")
 MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayısı", min_value=1, value=1)
@@ -335,7 +329,6 @@ MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayıs�
 st.sidebar.header("Manuel Raporlama")
 selected_date = st.sidebar.date_input("Rapor için bir tarih seçin", datetime.now())
 if st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder"):
-    # Butona basıldığında sadece state'i ayarla ve sayfayı yeniden çalıştır
     st.session_state['run_report'] = True
     st.session_state['report_date'] = selected_date
     st.rerun()
@@ -352,7 +345,6 @@ if past_df is not None:
 else:
     st.sidebar.warning("`soru_cevap_ornekleri.xlsx` dosyası bulunamadı.")
 
-# Telegram ve otomatik raporları kontrol et
 process_telegram_updates(stores_map, templates)
 check_and_send_daily_shipped_report(STORES)
 
@@ -463,8 +455,6 @@ for i, store in enumerate(STORES):
                             
                             cevap = st.text_area("Cevabınız:", value=default_text, key=f"textarea_{store['name']}_{q_id}")
                             if st.button(f"Cevabı Gönder (ID: {q_id})", key=f"btn_{store['name']}_{q_id}"):
-                                # No need for passes_forbidden_filter on manual entry
-                                # ok, why = passes_forbidden_filter(cevap)
                                 if not cevap.strip(): st.error("Boş cevap gönderilemez.")
                                 else:
                                     success, message = send_answer(store, q_id, cevap)
