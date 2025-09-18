@@ -6,9 +6,6 @@ import openai
 import re
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
-import time
-import pytz
-from collections import Counter
 
 # --- Streamlit Arayüzü ve Ayarları ---
 st.set_page_config(layout="wide")
@@ -146,104 +143,6 @@ def process_telegram_updates(stores_map, templates):
     except Exception as e:
         st.sidebar.error(f"Telegram güncellemeleri alınırken hata: {e}")
 
-# --- RAPORLAMA FONKSİYONLARI (YENİ VE GÜVENİLİR YÖNTEM) ---
-
-def fetch_all_orders_for_period(store, target_date):
-    """API'den status filtresi olmadan geniş bir aralıktaki tüm siparişleri çeker."""
-    headers = get_headers(store['api_key'], store['api_secret'])
-    turkey_tz = pytz.timezone("Europe/Istanbul")
-
-    api_start_date = target_date - timedelta(days=14)
-    start_timestamp = int(turkey_tz.localize(datetime.combine(api_start_date, datetime.min.time())).timestamp() * 1000)
-    end_timestamp = int(turkey_tz.localize(datetime.combine(target_date, datetime.max.time())).timestamp() * 1000)
-    
-    all_packages = []
-    page = 0
-    size = 200
-    
-    while True:
-        base_url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/orders"
-        params = f"startDate={start_timestamp}&endDate={end_timestamp}&page={page}&size={size}&orderByField=PackageLastModifiedDate&orderByDirection=DESC"
-        url = f"{base_url}?{params}"
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=20)
-            response.raise_for_status()
-            data = response.json()
-            packages = data.get("content", [])
-            all_packages.extend(packages)
-            
-            if not packages or len(packages) < size:
-                break
-            page += 1
-            time.sleep(0.5)
-        except requests.exceptions.RequestException as e:
-            st.sidebar.error(f"{store['name']} için rapor alınamadı: {e}")
-            return None
-    
-    return all_packages
-
-def generate_report_message(stores, target_date, final_status, title="Rapor"):
-    report_date_str = target_date.strftime("%Y-%m-%d")
-    report_message = f"📊 *{title} ({report_date_str})*\n\n"
-    any_data_found = False
-
-    turkey_tz = pytz.timezone("Europe/Istanbul")
-    start_of_target_day_ts = int(turkey_tz.localize(datetime.combine(target_date, datetime.min.time())).timestamp() * 1000)
-    end_of_target_day_ts = int(turkey_tz.localize(datetime.combine(target_date, datetime.max.time())).timestamp() * 1000)
-
-    for store in stores:
-        all_packages_in_period = fetch_all_orders_for_period(store, target_date)
-        
-        if all_packages_in_period is None:
-            report_message += f"*{store['name']}*: Veri alınamadı. ❌\n"
-            continue
-
-        filtered_packages = []
-        for pkg in all_packages_in_period:
-            if isinstance(pkg, dict) and pkg.get("status") == final_status:
-                modified_date_ts = pkg.get("packageLastModifiedDate")
-                if modified_date_ts and start_of_target_day_ts <= modified_date_ts <= end_of_target_day_ts:
-                    filtered_packages.append(pkg)
-
-        if not filtered_packages:
-            report_message += f"*{store['name']}*: Bu kriterde sipariş bulunamadı.\n"
-            if all_packages_in_period:
-                status_counts = Counter(pkg.get('status', 'Durum Yok') for pkg in all_packages_in_period if isinstance(pkg, dict))
-                debug_info = f"  _(Not: API'den {len(all_packages_in_period)} paket verisi alındı. Görülen durumlar: {', '.join([f'{k} ({v})' for k, v in status_counts.items()])})_\n"
-                report_message += debug_info
-            continue
-            
-        cargo_counts = Counter(pkg.get('cargoProviderName', 'Diğer') for pkg in filtered_packages)
-        any_data_found = True
-        total_packages = len(filtered_packages)
-        report_message += f"*{store['name']}* (Toplam: {total_packages} adet):\n"
-        for cargo_name, count in cargo_counts.items():
-            report_message += f" - {cargo_name}: *{count} adet*\n"
-        report_message += "\n"
-
-    if not any_data_found:
-        return f"📊 *{title} ({report_date_str})*\n\nTüm mağazalarda bu kriterde sipariş bulunamadı."
-
-    return report_message
-
-def check_and_send_daily_shipped_report(stores):
-    turkey_tz = pytz.timezone("Europe/Istanbul")
-    now = datetime.now(turkey_tz)
-    
-    if now.hour < 18:
-        return
-
-    today_str = now.strftime("%Y-%m-%d")
-    report_sent_key = f"report_sent_shipped_{today_str}"
-
-    if st.session_state.get(report_sent_key, False):
-        return
-    
-    report_message = generate_report_message(stores, now.date(), "Shipped", title="Günlük Kargoya Verilenler Raporu")
-    send_telegram_message(report_message)
-    st.session_state[report_sent_key] = True
-
 # --- DİĞER FONKSİYONLAR ---
 def get_pending_claims(store):
     url = f"https://apigw.trendyol.com/integration/order/sellers/{store['seller_id']}/claims?claimItemStatus=WaitingInAction&size=50&page=0"
@@ -308,33 +207,9 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
 
 # --- UYGULAMA BAŞLANGIÇ NOKTASI ---
 
-if 'run_report' not in st.session_state:
-    st.session_state['run_report'] = False
-
-if st.session_state['run_report']:
-    report_date = st.session_state['report_date']
-    
-    with st.spinner(f"{report_date.strftime('%d-%m-%Y')} için teslimat raporu oluşturuluyor..."):
-        report_text = generate_report_message(STORES, report_date, "Delivered", title="Tarihli Teslimat Raporu")
-        send_telegram_message(report_text)
-        
-        if "bulunamadı" in report_text:
-            st.session_state.report_result = "Rapor gönderildi, ancak belirtilen kriterlerde sipariş bulunamadı."
-        else:
-            st.session_state.report_result = f"{report_date.strftime('%d-%m-%Y')} tarihli rapor başarıyla gönderildi!"
-    
-    st.session_state['run_report'] = False
-
 # --- SIDEBAR (KENAR ÇUBUĞU) ---
 st.sidebar.header("Genel Ayarlar")
 MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayısı", min_value=1, value=1)
-
-st.sidebar.header("Manuel Raporlama")
-selected_date = st.sidebar.date_input("Rapor için bir tarih seçin", datetime.now())
-if st.sidebar.button("Seçili Günün Teslimat Raporunu Gönder"):
-    st.session_state['run_report'] = True
-    st.session_state['report_date'] = selected_date
-    st.rerun()
 
 # --- VERİ YÜKLEME VE ARKA PLAN İŞLEMLERİ ---
 templates = load_templates()
@@ -349,13 +224,6 @@ else:
     st.sidebar.warning("`soru_cevap_ornekleri.xlsx` dosyası bulunamadı.")
 
 process_telegram_updates(stores_map, templates)
-check_and_send_daily_shipped_report(STORES)
-
-# Rapor sonucunu ana gövdede göster
-if 'report_result' in st.session_state:
-    st.info(st.session_state.report_result)
-    del st.session_state.report_result # Mesajı bir kere gösterdikten sonra temizle
-
 
 # --- ANA SAYFA GÖVDESİ ---
 store_tabs = st.tabs([s['name'] for s in STORES])
