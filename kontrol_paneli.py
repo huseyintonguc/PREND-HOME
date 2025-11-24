@@ -37,6 +37,10 @@ if not AUTHORIZED_CHAT_IDS:
 # Sayfa otomatik yenileme
 st_autorefresh(interval=60 * 1000, key="data_fetch_refresher")
 
+# --- Session State Başlatma (Döngüyü Kırmak İçin) ---
+if 'processed_claims' not in st.session_state:
+    st.session_state.processed_claims = set()
+
 # --- Ortak Fonksiyonlar ---
 
 def get_headers(api_key, api_secret):
@@ -190,17 +194,15 @@ def send_answer(store, question_id, answer_text):
 def safe_generate_answer(product_name, question, past_df, min_examples=1):
     if not openai.api_key: return None, "OpenAI API anahtarı bulunamadı."
     
-    # past_df kontrolü (Opsiyonel hale getiriyoruz eğer min_examples 0 ise)
+    # past_df kontrolü
     examples = pd.DataFrame()
     if past_df is not None and not past_df.empty:
         mask = past_df['Ürün İsmi'].astype(str).str.contains(str(product_name), case=False, na=False)
         examples = past_df[mask]
     
-    # Eğer min_examples 0 ise, örnek olmasa da devam et. Değilse sayıyı kontrol et.
     if min_examples > 0 and len(examples) < min_examples:
         return None, f"Örnek sayısı yetersiz ({len(examples)}/{min_examples})."
     
-    # Prompt oluşturma (Geliştirildi)
     prompt = f"""
     Sen Trendyol'da satış yapan bir mağazanın profesyonel müşteri temsilcisisin.
     Müşteriden gelen soruyu, ürün bilgisine dayanarak nazik ve açıklayıcı bir şekilde cevapla.
@@ -209,7 +211,6 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
     Soru: {question}
     """
     
-    # Varsa örnekleri ekle
     if not examples.empty:
         prompt += "\n\nBenzer Geçmiş Sorular ve Cevaplarımız:\n"
         for idx, row in examples.head(3).iterrows():
@@ -234,14 +235,12 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
 # --- SIDEBAR (KENAR ÇUBUĞU) ---
 st.sidebar.header("Genel Ayarlar")
 
-# Kullanıcı İsteği 1: Örnek zorunluluğunu kaldırma imkanı (min_value=0)
 MIN_EXAMPLES = st.sidebar.number_input(
     "Otomatik cevap için min. örnek sayısı (0 = Örneksiz çalışır)", 
     min_value=0, 
     value=0
 )
 
-# Kullanıcı İsteği 2: Gecikme süresini arayüzden girme
 DELAY_MINUTES = st.sidebar.number_input(
     "Otomatik Cevap Gecikmesi (Dakika)", 
     min_value=1, 
@@ -284,21 +283,31 @@ for i, store in enumerate(STORES):
                 st.write(f"**{len(claims)}** adet onay bekleyen talep var.")
                 for claim in claims:
                     if isinstance(claim, dict) and claim.get('id'):
-                        with st.expander(f"Sipariş No: {claim.get('orderNumber')} - Talep ID: {claim.get('id')}", expanded=True):
+                        claim_id = claim.get('id')
+                        with st.expander(f"Sipariş No: {claim.get('orderNumber')} - Talep ID: {claim_id}", expanded=True):
                             st.write(f"**Talep Nedeni:** {claim.get('claimType', {}).get('name', 'Belirtilmemiş')}")
                             st.write(f"**Durum:** {claim.get('status')}")
+                            
                             if store.get('auto_approve_claims'):
-                                with st.spinner("Otomatik olarak onaylanıyor..."):
-                                    item_ids = [item.get('id') for batch in claim.get('items', []) for item in batch.get('claimItems', [])]
-                                    if item_ids:
-                                        success, message = approve_claim_items(store, claim.get('id'), item_ids)
-                                        if success: 
-                                            st.success("Talep başarıyla otomatik onaylandı.")
-                                            st.rerun()
-                                        else: 
-                                            st.error(f"Otomatik onay başarısız: {message}")
-                                    else:
-                                        st.warning("Onaylanacak ürün kalemi bulunamadı.")
+                                # --- DÖNGÜ ENGELLEME KONTROLÜ ---
+                                if claim_id in st.session_state.processed_claims:
+                                    st.warning("⚠️ Bu talep bu oturumda daha önce denendi. Döngüyü önlemek için otomatik onay pas geçiliyor. Lütfen manuel kontrol edin.")
+                                else:
+                                    with st.spinner("Otomatik olarak onaylanıyor..."):
+                                        item_ids = [item.get('id') for batch in claim.get('items', []) for item in batch.get('claimItems', [])]
+                                        if item_ids:
+                                            # Deneme yapmadan önce listeye ekle ki hata alsa bile bir daha denemesin
+                                            st.session_state.processed_claims.add(claim_id)
+                                            
+                                            success, message = approve_claim_items(store, claim_id, item_ids)
+                                            if success: 
+                                                st.success("Talep başarıyla otomatik onaylandı.")
+                                                # Rerun yapıyoruz ama ID zaten listede olduğu için tekrar geldiğinde 'warning' verecek (eğer API'dan düşmemişse)
+                                                st.rerun()
+                                            else: 
+                                                st.error(f"Otomatik onay başarısız: {message}")
+                                        else:
+                                            st.warning("Onaylanacak ürün kalemi bulunamadı.")
         with col2:
             st.subheader("Cevap Bekleyen Müşteri Soruları")
             
@@ -343,7 +352,6 @@ for i, store in enumerate(STORES):
                         st.markdown(f"**Soru:** *{q.get('text', '')}*")
                         is_auto_answer_active = store.get('auto_answer_questions', False)
                         
-                        # GÜNCELLEME: Secrets yerine UI'dan gelen DELAY_MINUTES kullanılıyor
                         delay_minutes = DELAY_MINUTES
                         
                         if f"time_{q_id}" not in st.session_state: st.session_state[f"time_{q_id}"] = datetime.now()
@@ -367,7 +375,7 @@ for i, store in enumerate(STORES):
                             else:
                                 remaining_seconds = (timedelta(minutes=delay_minutes) - elapsed).total_seconds()
                                 st.warning(f"Bu soruya otomatik cevap yaklaşık **{int(remaining_seconds / 60)} dakika {int(remaining_seconds % 60)} saniye** içinde gönderilecek.")
-                        else: # Manuel mod
+                        else: 
                             suggestion, reason = safe_generate_answer(q.get("productName", ""), q.get("text", ""), past_df, min_examples=MIN_EXAMPLES)
                             default_text = suggestion if suggestion is not None else ""
                             if suggestion is None: st.info(f"Öneri üretilmedi: {reason}")
