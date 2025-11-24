@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 
 # --- Streamlit Arayüzü ve Ayarları ---
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Trendyol Panel")
 st.title("Trendyol Multi-Store Otomasyon Paneli")
 
 # --- Ortak API Bilgilerini Oku ---
@@ -189,18 +189,42 @@ def send_answer(store, question_id, answer_text):
 
 def safe_generate_answer(product_name, question, past_df, min_examples=1):
     if not openai.api_key: return None, "OpenAI API anahtarı bulunamadı."
-    if past_df is None or past_df.empty: return None, "Örnek veri dosyası bulunamadı."
     
-    mask = past_df['Ürün İsmi'].astype(str).str.contains(str(product_name), case=False, na=False)
-    examples = past_df[mask]
-    if len(examples) < min_examples:
+    # past_df kontrolü (Opsiyonel hale getiriyoruz eğer min_examples 0 ise)
+    examples = pd.DataFrame()
+    if past_df is not None and not past_df.empty:
+        mask = past_df['Ürün İsmi'].astype(str).str.contains(str(product_name), case=False, na=False)
+        examples = past_df[mask]
+    
+    # Eğer min_examples 0 ise, örnek olmasa da devam et. Değilse sayıyı kontrol et.
+    if min_examples > 0 and len(examples) < min_examples:
         return None, f"Örnek sayısı yetersiz ({len(examples)}/{min_examples})."
     
-    prompt = ("Sen bir pazaryeri müşteri temsilcisisin...")
+    # Prompt oluşturma (Geliştirildi)
+    prompt = f"""
+    Sen Trendyol'da satış yapan bir mağazanın profesyonel müşteri temsilcisisin.
+    Müşteriden gelen soruyu, ürün bilgisine dayanarak nazik ve açıklayıcı bir şekilde cevapla.
+    
+    Ürün: {product_name}
+    Soru: {question}
+    """
+    
+    # Varsa örnekleri ekle
+    if not examples.empty:
+        prompt += "\n\nBenzer Geçmiş Sorular ve Cevaplarımız:\n"
+        for idx, row in examples.head(3).iterrows():
+            prompt += f"- Soru: {row['Soru Detayı']}\n  Cevap: {row['Onaylanan Cevap']}\n"
+    else:
+        prompt += "\n\nLütfen genel e-ticaret nezaket kurallarına uygun, yardımsever bir cevap üret."
 
     try:
         client = openai.OpenAI(api_key=openai.api_key)
-        response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=150, temperature=0.4)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini", 
+            messages=[{"role": "user", "content": prompt}], 
+            max_tokens=150, 
+            temperature=0.4
+        )
         answer = response.choices[0].message.content.strip()
         return (answer, "")
     except Exception as e: return None, f"OpenAI hata: {e}"
@@ -209,7 +233,21 @@ def safe_generate_answer(product_name, question, past_df, min_examples=1):
 
 # --- SIDEBAR (KENAR ÇUBUĞU) ---
 st.sidebar.header("Genel Ayarlar")
-MIN_EXAMPLES = st.sidebar.number_input("Otomatik cevap için min. örnek sayısı", min_value=1, value=1)
+
+# Kullanıcı İsteği 1: Örnek zorunluluğunu kaldırma imkanı (min_value=0)
+MIN_EXAMPLES = st.sidebar.number_input(
+    "Otomatik cevap için min. örnek sayısı (0 = Örneksiz çalışır)", 
+    min_value=0, 
+    value=0
+)
+
+# Kullanıcı İsteği 2: Gecikme süresini arayüzden girme
+DELAY_MINUTES = st.sidebar.number_input(
+    "Otomatik Cevap Gecikmesi (Dakika)", 
+    min_value=1, 
+    value=5,
+    help="Soru geldikten sonra bu süre kadar beklenir, siz cevaplamazsanız bot cevaplar."
+)
 
 # --- VERİ YÜKLEME VE ARKA PLAN İŞLEMLERİ ---
 templates = load_templates()
@@ -219,7 +257,7 @@ stores_map = {store['name']: store for store in STORES}
 if not templates:
     st.sidebar.warning("`cevap_sablonlari.xlsx` dosyası bulunamadı veya boş.")
 if past_df is not None:
-    st.sidebar.success("Soru-cevap örnekleri yüklendi.")
+    st.sidebar.success(f"Soru-cevap örnekleri yüklendi ({len(past_df)} kayıt).")
 else:
     st.sidebar.warning("`soru_cevap_ornekleri.xlsx` dosyası bulunamadı.")
 
@@ -304,9 +342,13 @@ for i, store in enumerate(STORES):
                     with st.expander(f"Soru ID: {q_id} - Ürün: {q.get('productName', '')[:30]}...", expanded=True):
                         st.markdown(f"**Soru:** *{q.get('text', '')}*")
                         is_auto_answer_active = store.get('auto_answer_questions', False)
-                        delay_minutes = store.get('delay_minutes', 5)
+                        
+                        # GÜNCELLEME: Secrets yerine UI'dan gelen DELAY_MINUTES kullanılıyor
+                        delay_minutes = DELAY_MINUTES
+                        
                         if f"time_{q_id}" not in st.session_state: st.session_state[f"time_{q_id}"] = datetime.now()
                         elapsed = datetime.now() - st.session_state[f"time_{q_id}"]
+                        
                         if is_auto_answer_active:
                             if delay_minutes == 0 or elapsed >= timedelta(minutes=delay_minutes):
                                 with st.spinner(f"Soru ID {q_id}: Otomatik cevap kontrol ediliyor..."):
@@ -341,4 +383,3 @@ for i, store in enumerate(STORES):
                                         st.rerun()
                                     else: 
                                         st.error(f"Cevap gönderilemedi: {message}")
-
